@@ -70,16 +70,38 @@ def stamp(day,clock):
     return datetime.combine(day,clock).isoformat(timespec="seconds")
 
 def parse_rows(rows):
-    card=None; result=[]
+    card=None; result=[]; order=list(range(8))
+    aliases=(
+        {"операция","тип операции","вид операции"},
+        {"дата","дата операции"},
+        {"время","время операции"},
+        {"азс","станция","адрес азс","место заправки"},
+        {"топливо","продукт","товар","наименование"},
+        {"цена","цена за литр","цена руб/л","цена, руб"},
+        {"кол-во","количество","объем","объём","литры","количество, л"},
+        {"сумма","сумма, руб","стоимость","сумма, ₽"})
     for i,raw in enumerate(rows,1):
-        r=(list(raw)+[None]*8)[:8]; label=str(r[0] or "").strip()
+        values=list(raw)
+        label=str(values[0] or "").strip() if values else ""
         m=re.match(r"^Карта\s*№\s*(\d+)(?:\s|$)",label,re.I)
         if m: card=m.group(1); continue
         if re.match(r"^Карта\s*№",label,re.I): raise ValueError(f"Строка {i}: неверный номер карты")
-        if label.casefold() not in ("отгрузка","возврат"): continue
+        normalized=[" ".join(str(x or "").strip().casefold().split()) for x in values]
+        if any(x in aliases[0] for x in normalized):
+            matches=[[j for j,v in enumerate(normalized) if v in names] for names in aliases]
+            if any(len(x)!=1 for x in matches):raise ValueError(f"Строка {i}: неполные или неоднозначные заголовки")
+            order=[x[0] for x in matches];continue
+        r=[values[j] if j<len(values) else None for j in order]
+        op=str(r[0] or "").strip().casefold()
+        if op not in ("отгрузка","возврат"):
+            if op and any(r[j] not in (None,"") for j in (1,2)) and any(r[j] not in (None,"") for j in (5,6,7)):
+                # Reject transaction-like rows, but leave explicit statement subtotals separate.
+                if not op.startswith(("итого","всего","итог","сальдо")):
+                    raise ValueError(f"Строка {i}: неизвестная операция {op[:80]}")
+            continue
         try:
             if not card: raise ValueError("Нет номера карты")
-            op=label.casefold(); when=stamp(r[1],r[2]); station=str(r[3] or "").strip(); product=str(r[4] or "").strip()
+            when=stamp(r[1],r[2]); station=str(r[3] or "").strip(); product=str(r[4] or "").strip()
             price,qty,amount=map(cents,r[5:8])
             if not station or not product or price<0 or (op=="возврат" and (qty>0 or amount>0)) or (op=="отгрузка" and (qty<0 or amount<0)): raise ValueError("Некорректная операция")
             result.append((card,when,op,station,product,category(product),price,qty,amount))
@@ -113,7 +135,7 @@ def parse_file(name,blob):
         try:
             for sheet in book.worksheets:
                 if (sheet.max_row or 0)>100000 or (sheet.max_column or 0)>256: raise ValueError("Слишком большая таблица")
-                result.extend(parse_rows(sheet.iter_rows(max_col=8,values_only=True)))
+                result.extend(parse_rows(sheet.iter_rows(max_col=max(8,sheet.max_column or 8),values_only=True)))
         finally: book.close()
     else: raise ValueError("Поддерживаются только XLS и XLSX")
     return result
