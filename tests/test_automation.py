@@ -75,10 +75,20 @@ class AutomationTests(unittest.TestCase):
         months=list(automation.history_months(target,2))
         self.assertFalse(automation.readiness(self.c,months[0])["ready"])
         for m,start,end in ((months[1],20,10),(months[0],10,5)):
+            for n,day,first,last in (("1",m+"-01",0,50),("2",m+"-02",50,100)):
+                operations.save_waybill(self.c,{"vehicle_id":1,"number":n,"day":day,"odo_first":first,"odo_last":last})
             writeoff.save(self.c,{"month":m,"vehicle_id":1,"revision":0,"reason":"Тест","payload":{
                 "start":start,"end":end,"capacity":100,"odo_first":0,"odo_last":100,"first_ref":"1","last_ref":"2",
-                "season":"summer","summer_norm":10,"winter_norm":12}})
+                "season":"summer","summer_norm":10,"winter_norm":12,"fuel_reviewed":True,"fuel_review_reason":"Нет заправок по проверенной выписке"}})
         self.assertTrue(automation.readiness(self.c,months[0])["ready"])
+        writeoff.month_action(self.c,months[0],"close","Проверено")
+        self.assertTrue(writeoff.report(self.c,months[0])["closed"])
+        with self.assertRaises(ValueError):writeoff.save(self.c,{"month":months[0],"vehicle_id":1,"revision":1,"reason":"Тест","payload":{}})
+        change(self.c,"vehicles",{"id":1,"make":"Test","model":"Car","plate":"A123AA","fuel_type":"Дизель","summer":12,"winter":14,"employee_id":1})
+        self.assertEqual(writeoff.report(self.c,months[0])["rows"][0]["fuel_type"],"Бензин")
+        change(self.c,"vehicles",{"id":1,"make":"Test","model":"Car","plate":"A123AA","fuel_type":"Бензин","summer":10,"winter":12,"employee_id":1})
+        writeoff.month_action(self.c,months[0],"reopen","Сверка")
+        self.assertFalse(writeoff.report(self.c,months[0])["closed"])
         self.assertEqual(automation.forecast(self.c,target)["rows"][0]["forecast"],7.5)
         self.assertIsNone(automation.forecast(self.c,months[1])["rows"][0]["forecast"])
         book=load_workbook(BytesIO(automation.export_review(self.c,target)))
