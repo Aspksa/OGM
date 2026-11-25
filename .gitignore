@@ -8,3 +8,5 @@ __pycache__/
 static/fuel-ui.js
 
 static/writeoff-ui.js
+
+static/operations-ui.js
