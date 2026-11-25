@@ -1,3 +1,4 @@
+from contextlib import closing
 import sqlite3
 import tempfile
 import unittest
@@ -42,5 +43,5 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(snapshot(self.c)["vehicles"],[])
     def test_edit_and_persistence(self):
         change(self.c,"employees",{"id":1,"last_name":"Петров","first_name":"Иван"})
-        with connect(self.path) as c:
+        with closing(connect(self.path)) as c:
             self.assertEqual(snapshot(c)["employees"][0]["last_name"],"Петров")
