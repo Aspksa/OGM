@@ -4,3 +4,5 @@ static/app.js
 __pycache__/
 *.pyc
 *.log
+
+static/fuel-ui.js
