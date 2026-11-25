@@ -1,3 +1,4 @@
+import {renderWriteoff} from './writeoff-ui.js';
 import {renderFuel} from './fuel-ui.js';
 type Kind = "employees"|"vehicles"|"cards";
 type Entry = {id:number; archived:number; [key:string]:string|number|null};
@@ -12,7 +13,7 @@ const fields:Record<Kind,Field[]> = {
  cards:[{key:"number",label:"Номер топливной карты",required:true},{key:"employee_id",label:"Закреплена за",type:"employee"}]
 };
 let data:Data={employees:[],vehicles:[],cards:[]};
-let page:"home"|"fuel"|Kind="home", query="", archived=false, editing:Entry|undefined, editKind:Kind="employees";
+let page:"home"|"fuel"|"writeoff"|Kind="home", query="", archived=false, editing:Entry|undefined, editKind:Kind="employees";
 const dialog=$<HTMLDialogElement>("dialog"), form=$<HTMLFormElement>("editor");
 const active=(kind:Kind)=>data[kind].filter(r=>!r.archived);
 const show=(v:unknown)=>v===null||v===undefined||v===""?"—":String(v);
@@ -22,11 +23,12 @@ const car=(r?:Entry)=>r?[r.make,r.model,r.plate].join(" · "):"—";
 const linked=(kind:"vehicles"|"cards",id:number)=>active(kind).find(r=>r.employee_id===id);
 const fmtDate=(v:unknown)=>typeof v==="string"&&v? v.split("-").reverse().join("."):"—";
 function insurance(r:Entry){if(!r.insurance_end)return {text:"Не указана",cls:"muted"};const now=new Date();now.setHours(0,0,0,0);const end=new Date(String(r.insurance_end)+"T00:00:00");const days=Math.round((end.getTime()-now.getTime())/86400000);return {text:fmtDate(r.insurance_end)+(days<0?" · истекла":days<=30?" · "+days+" дн.":""),cls:days<0?"danger":days<=30?"warning":""};}
-const sections:[string,string,Kind|"home"|"fuel"|null][]=[["Главная","M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z","home"],["Сотрудники","M12 12a4 4 0 1 0 0-8a4 4 0 0 0 0 8 M4 21v-2a8 8 0 0 1 16 0v2","employees"],["Табель","M3 5h18v16H3z M7 2v6 M17 2v6 M3 11h18",null],["Автомобили","M3 16v-5l3-6h12l3 6v5z M3 16v3 M21 16v3 M3 11h18","vehicles"],["Топливные карты","M3 5h18v14H3z M3 10h18","cards"],["ГСМ","M5 21V4h10v17 M5 9h10 M15 11h3v7h3V8","fuel"],["Путевые листы","M5 3h14v18H5z M8 8h8 M8 12h8 M8 16h5",null],["Документы","M3 6h7l2 2h9v12H3z",null],["Аналитика","M4 20V12 M10 20V6 M16 20V9 M22 20V3",null],["Искусственный интеллект","M8 4h8v16H8z M4 8h4 M4 16h4 M16 8h4 M16 16h4",null],["Настройки","M12 3v18 M3 12h18 M5 5l14 14 M19 5L5 19",null]];
+const sections:[string,string,Kind|"home"|"fuel"|"writeoff"|null][]=[["Главная","M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z","home"],["Сотрудники","M12 12a4 4 0 1 0 0-8a4 4 0 0 0 0 8 M4 21v-2a8 8 0 0 1 16 0v2","employees"],["Табель","M3 5h18v16H3z M7 2v6 M17 2v6 M3 11h18",null],["Автомобили","M3 16v-5l3-6h12l3 6v5z M3 16v3 M21 16v3 M3 11h18","vehicles"],["Топливные карты","M3 5h18v14H3z M3 10h18","cards"],["ГСМ","M5 21V4h10v17 M5 9h10 M15 11h3v7h3V8","fuel"],["Списание ГСМ","M4 4h16v16H4z M7 8h10 M7 12h10 M7 16h6","writeoff"],["Путевые листы","M5 3h14v18H5z M8 8h8 M8 12h8 M8 16h5",null],["Документы","M3 6h7l2 2h9v12H3z",null],["Аналитика","M4 20V12 M10 20V6 M16 20V9 M22 20V3",null],["Искусственный интеллект","M8 4h8v16H8z M4 8h4 M4 16h4 M16 8h4 M16 16h4",null],["Настройки","M12 3v18 M3 12h18 M5 5l14 14 M19 5L5 19",null]];
 function nav(){const n=$("nav");n.replaceChildren();for(const [name,path,key] of sections){const b=el("button",undefined,key===page?"active":"");const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");svg.setAttribute("viewBox","0 0 24 24");svg.setAttribute("aria-hidden","true");const p=document.createElementNS(svg.namespaceURI,"path");p.setAttribute("d",path);p.setAttribute("fill","none");p.setAttribute("stroke","currentColor");p.setAttribute("stroke-width","1.5");svg.append(p);b.append(svg,document.createTextNode(name));if(key)b.onclick=()=>go(key);else{b.disabled=true;b.title="Запланированный раздел";}n.append(b);}}
-function go(key:Kind|"home"|"fuel"){page=key;query="";archived=false;render();}
+function go(key:Kind|"home"|"fuel"|"writeoff"){page=key;query="";archived=false;render();}
 function btn(text:string,fn:()=>void,cls?:string){const b=el("button",text,cls);b.type="button";b.onclick=fn;return b;}
-function render(){nav();$("title").textContent=page==="home"?"Главная":page==="fuel"?"ГСМ":titles[page];const v=$("view");v.replaceChildren();
+function render(){nav();$("title").textContent=page==="home"?"Главная":page==="fuel"?"ГСМ":page==="writeoff"?"Списание ГСМ":titles[page];const v=$("view");v.replaceChildren();
+ if(page==="writeoff"){void renderWriteoff(v);return;}
  if(page==="fuel"){void renderFuel(v,async()=>{const r=await fetch("/api/data");if(r.ok)data=await r.json();return data;});return;}
  if(page==="home"){const m=el("div",undefined,"metrics");for(const k of Object.keys(titles) as Kind[]){const b=btn("",()=>go(k),"metric");b.append(el("span",titles[k],"muted"),el("strong",String(active(k).length)));m.append(b);}v.append(m,el("h2","Контроль страховок","section-title"));const due=active("vehicles").filter(r=>insurance(r).cls!=="");if(!due.length)v.append(el("p","Нет автомобилей с истекающей или неуказанной страховкой.","muted"));for(const r of due){const p=el("p");p.append(document.createTextNode(car(r)+" — "),el("span",insurance(r).text,insurance(r).cls));v.append(p);}return;}
  const kind=page,bar=el("div",undefined,"toolbar"), search=el("input");search.type="search";search.placeholder="Поиск по справочнику";search.setAttribute("aria-label","Поиск");search.value=query;const count=el("span","","count"), wrap=el("div",undefined,"table-wrap");search.oninput=()=>{query=search.value;fill();};bar.append(search,btn("+ Добавить",()=>openEditor(kind),"primary"),btn(archived?"Активные":"Архив",()=>{archived=!archived;render();}),count);v.append(bar,wrap);
