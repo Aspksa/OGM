@@ -13,10 +13,12 @@ if exist "runtime\python\python.exe" set "PY=runtime\python\python.exe"
 if errorlevel 1 (
   %PY% -m pip install -r requirements.txt || goto fail
 )
-if not exist "static\operations-ui.js" (
+%PY% build_check.py >nul 2>&1
+if errorlevel 1 (
   if exist "runtime\node\npm.cmd" set "PATH=%~dp0runtime\node;%PATH%"
   call npm.cmd install --no-audit --no-fund || goto fail
   call npm.cmd run build || goto fail
+  %PY% build_check.py mark || goto fail
 )
 %PY% -u server.py
 if errorlevel 1 goto fail
