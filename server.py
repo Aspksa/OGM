@@ -303,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
             except sqlite3.Error: return self.send_data(409,{"error":"Ошибка записи SQLite"})
             except ImportError: return self.send_data(503,{"error":"Установите зависимости"})
             except Exception: return self.send_data(400,{"error":"Не удалось обработать запрос или файл"})
-        if parts.path in ("/api/fuel/import","/api/fuel/period"):
+        if parts.path in ("/api/fuel/import","/api/fuel/period","/api/fuel/cancel"):
             try:
                 size=int(self.headers.get("Content-Length","0"))
                 if not 0<size<=(fuel.MAX_FILE if parts.path.endswith("import") else 16384): raise ValueError("Недопустимый размер запроса")
@@ -313,7 +313,10 @@ class Handler(BaseHTTPRequestHandler):
                         name=parse_qs(parts.query).get("name",[""])[0]
                         automation.file_kind(name,body)
                         return self.send_data(200,fuel.ingest(c,name,body))
-                    fuel.add_period(c,json.loads(body))
+                    d=json.loads(body)
+                    if not isinstance(d,dict):raise ValueError("Некорректный запрос")
+                    if parts.path.endswith("/cancel"):fuel.cancel_import(c,d)
+                    else:fuel.add_period(c,d)
                     return self.send_data(200,{"ok":True})
             except ImportError: return self.send_data(503,{"error":"Установите зависимости из requirements.txt"})
             except (ValueError,TypeError,KeyError,OverflowError) as e: return self.send_data(400,{"error":str(e)})
