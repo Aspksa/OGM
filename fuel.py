@@ -29,9 +29,26 @@ def sync_links(c):
         if old is None or tuple(old)!=value:
             c.execute("INSERT INTO fuel_links(card_id,at,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?)",(r[0],now,*value))
 
-def category(product):
+def legacy_category(product):
     t=product.casefold()
     return "Бензин" if "бензин" in t else "Дизель" if "дизель" in t or re.search(r"\bдт\b",t) else "Другое"
+
+def category(product):
+    t=product.casefold().strip()
+    petrol=bool("бензин" in t or re.search(r"(?<!\w)(?:аи|ai|а-и|a-i|а|a)[\s\-–]*(?:76|80|92|93|95|98|100)(?!\d)",t))
+    diesel=bool("дизель" in t or re.search(r"(?<!\w)(?:дт|dt)(?![а-яa-z])",t))
+    return "Бензин" if petrol and not diesel else "Дизель" if diesel and not petrol else "Другое"
+
+def signature(row):
+    # Keep identity compatible with all 0.2–0.4 imports despite improved classification.
+    legacy=(*row[:5],legacy_category(row[4]),*row[6:])
+    return sha256(json.dumps(legacy,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
+
+def link_at(c,card_id,when):
+    link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_periods WHERE card_id=? AND start<=? AND end>?",(card_id,when,when)).fetchone()
+    if link is None:
+        link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_links WHERE card_id=? AND at<=? ORDER BY at DESC LIMIT 1",(card_id,when)).fetchone()
+    return tuple(link) if link else (None,None,"")
 
 def cents(value):
     d=Decimal(str(value).replace(" ","").replace("\xa0","").replace(",","."))
@@ -112,7 +129,7 @@ def ingest(c,name,blob):
             if card: card_id=card[0]
             else:
                 card_id=c.execute("INSERT INTO cards(number) VALUES(?)",(row[0],)).lastrowid;new_cards+=1
-            sig=sha256(json.dumps(row,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
+            sig=signature(row)
             counts[sig]+=1
             cur=c.execute("INSERT INTO fuel_operations(import_id,card_id,card_number,moment,operation,station,product,category,price,quantity,amount,signature,occurrence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(signature,occurrence) DO NOTHING",(ident,card_id,*row,sig,counts[sig]))
             if cur.rowcount: inserted+=1
@@ -144,9 +161,8 @@ def report(c,month=""):
     employees={r["id"]:" ".join(filter(None,(r["last_name"],r["first_name"],r["middle_name"]))) for r in c.execute("SELECT * FROM employees")}
     vehicles={r["id"]:" ".join((r["make"],r["model"],r["plate"])) for r in c.execute("SELECT * FROM vehicles")}
     for r in rows:
-        link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_periods WHERE card_id=? AND start<=? AND end>?",(r["card_id"],r["moment"],r["moment"])).fetchone()
-        if link is None: link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_links WHERE card_id=? AND at<=? ORDER BY at DESC LIMIT 1",(r["card_id"],r["moment"])).fetchone()
-        e,v,f=tuple(link) if link else (None,None,"")
+        e,v,f=link_at(c,r["card_id"],r["moment"])
+        r["category"]=category(r["product"])
         r.update(employee_id=e,vehicle_id=v,employee=employees.get(e,""),vehicle=vehicles.get(v,""))
         flags=[]
         if not e: flags.append("Нет закрепления на дату")
