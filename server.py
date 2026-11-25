@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, parse_qs, quote
 import fuel
 import writeoff
 import operations
+import automation
 import maintenance
 import os
 
@@ -169,6 +170,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_data(200, snapshot(c))
         parts=urlsplit(self.path)
         args=parse_qs(parts.query)
+        if parts.path.startswith("/api/automation/"):
+            try:
+                with closing(connect()) as c:
+                    c.execute("BEGIN")
+                    kind=parts.path.split("/")[-1]
+                    month=args.get("month",[""])[0]
+                    if kind=="readiness": result=automation.readiness(c,month)
+                    elif kind=="forecast": result=automation.forecast(c,month)
+                    elif kind=="prices": result=automation.price_trend(c,month)
+                    elif kind=="mileage":
+                        vid=int(args.get("id",["0"])[0])
+                        writeoff.month_bounds(month)
+                        result=automation.mileage_proposal(c,month,vid,writeoff.stored(c,month,vid)[0])
+                    elif kind=="export":
+                        return self.send_data(200,automation.export_review(c,month),"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","OGM-review-"+month+".xlsx")
+                    else:return self.send_data(404,{"error":"Не найдено"})
+                    return self.send_data(200,result)
+            except (ValueError,TypeError,KeyError,OverflowError) as e:return self.send_data(400,{"error":str(e)})
+            except (sqlite3.Error,ImportError):return self.send_data(503,{"error":"Ошибка базы или зависимостей"})
         if parts.path.startswith("/api/ops/"):
             try:
                 with closing(connect()) as c:
@@ -233,6 +253,19 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local_host() or self.headers.get("Origin") != f"http://127.0.0.1:{self.server.server_port}":
             return self.send_data(403, {"error":"Недопустимый источник"})
         parts=urlsplit(self.path)
+        if parts.path=="/api/automation/preview":
+            try:
+                size=int(self.headers.get("Content-Length","0"))
+                if not 0<size<=fuel.MAX_FILE:raise ValueError("Недопустимый размер файла")
+                body=self.rfile.read(size)
+                if len(body)!=size:raise ValueError("Файл получен не полностью")
+                name=parse_qs(parts.query).get("name",[""])[0]
+                with closing(connect()) as c:
+                    c.execute("BEGIN")
+                    return self.send_data(200,automation.preview(c,name,body))
+            except ValueError as e:return self.send_data(400,{"error":str(e)})
+            except (sqlite3.Error,ImportError):return self.send_data(503,{"error":"Ошибка базы или зависимостей"})
+            except Exception:return self.send_data(400,{"error":"Не удалось распознать книгу Excel"})
         if parts.path in ("/api/ops/waybill","/api/ops/settings","/api/ops/backup"):
             try:
                 size=int(self.headers.get("Content-Length","0"))
@@ -272,6 +305,7 @@ class Handler(BaseHTTPRequestHandler):
                 with closing(connect()) as c:
                     if parts.path.endswith("import"):
                         name=parse_qs(parts.query).get("name",[""])[0]
+                        automation.file_kind(name,body)
                         return self.send_data(200,fuel.ingest(c,name,body))
                     fuel.add_period(c,json.loads(body))
                     return self.send_data(200,{"ok":True})
