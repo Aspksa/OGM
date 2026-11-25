@@ -122,6 +122,8 @@ def calculate(p,card,vehicle_fuel,prev,issues=()):
     else: flags.append("Нет полного комплекта показаний одометра")
     km=p.get("km_override") if p.get("km_override") is not None else rawkm
     if km is None: flags.append("Пробег не определён")
+    if rawkm is not None and p.get("km_override") is not None and abs(rawkm-km)>0.005: flags.append("Использован скорректированный пробег вместо показаний одометра")
+    if km==0 and initial is not None and end is not None and initial+card-end>0: flags.append("Нулевой пробег при изменении топливного баланса")
     if not p.get("first_ref") or not p.get("last_ref"): flags.append("Не указаны первый/последний путевые листы")
     ins=outs=unconfirmed=0
     for op in p.get("manual",[]):
@@ -184,7 +186,14 @@ def import_old(c,month,name,blob):
             if not r[0]: continue
             vals=[number(v) for v in r[4:17]]
             match=c.execute("SELECT id FROM vehicles WHERE plate=?",(plate(r[0]),)).fetchone()
-            rows.append({"row":i,"plate":str(r[0]),"model":str(r[1] or ""),"category":str(r[2] or ""),"driver":str(r[3] or ""),"values":vals,"note":str(r[17] or ""),"vehicle_id":match[0] if match else None})
+            issues=[]
+            active=[any((vals[j+offset] or 0)!=0 for j in (1,3,5,7,9,11)) for offset in (0,1)]
+            if all(active): issues.append("В строке есть значения по двум видам топлива")
+            for offset,label in ((0,"ДТ"),(1,"Бензин")):
+                a,b,actual,end=(vals[j+offset] for j in (1,3,5,9))
+                if a is not None and end is not None and abs(rounded(a+(b or 0)-end)-(actual or 0))>0.01:
+                    issues.append(label+": исходный факт не совпадает с балансом без дополнительных операций")
+            rows.append({"row":i,"plate":str(r[0]),"model":str(r[1] or ""),"category":str(r[2] or ""),"driver":str(r[3] or ""),"values":vals,"note":str(r[17] or ""),"flags":issues,"vehicle_id":match[0] if match else None})
         if not rows: raise ValueError("Нет автомобилей")
     finally: book.close()
     digest=sha256(blob).hexdigest();name=name.replace("\\","/").rsplit("/",1)[-1][:200]
