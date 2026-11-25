@@ -1,0 +1,179 @@
+from collections import Counter, defaultdict
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal, ROUND_HALF_UP
+from hashlib import sha256
+from io import BytesIO
+import json
+import re
+import zipfile
+
+MAX_FILE=12*1024*1024
+SCHEMA="""
+CREATE TABLE IF NOT EXISTS fuel_imports(id INTEGER PRIMARY KEY, filename TEXT NOT NULL, digest TEXT UNIQUE NOT NULL, imported_at TEXT NOT NULL, source BLOB NOT NULL, inserted INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS fuel_operations(id INTEGER PRIMARY KEY, import_id INTEGER REFERENCES fuel_imports(id), card_id INTEGER REFERENCES cards(id), card_number TEXT NOT NULL, moment TEXT NOT NULL, operation TEXT NOT NULL, station TEXT NOT NULL, product TEXT NOT NULL, category TEXT NOT NULL, price INTEGER NOT NULL, quantity INTEGER NOT NULL, amount INTEGER NOT NULL, signature TEXT NOT NULL, occurrence INTEGER NOT NULL, UNIQUE(signature,occurrence));
+CREATE INDEX IF NOT EXISTS fuel_ops_moment ON fuel_operations(moment);
+CREATE TABLE IF NOT EXISTS fuel_links(id INTEGER PRIMARY KEY, card_id INTEGER REFERENCES cards(id), at TEXT NOT NULL, employee_id INTEGER REFERENCES employees(id), vehicle_id INTEGER REFERENCES vehicles(id), fuel_type TEXT NOT NULL, UNIQUE(card_id,at));
+CREATE TABLE IF NOT EXISTS fuel_periods(id INTEGER PRIMARY KEY, card_id INTEGER REFERENCES cards(id), start TEXT NOT NULL, end TEXT NOT NULL, employee_id INTEGER REFERENCES employees(id), vehicle_id INTEGER REFERENCES vehicles(id), fuel_type TEXT NOT NULL, CHECK(start<end));
+"""
+def initialize(c):
+    if "fuel_type" not in {r[1] for r in c.execute("PRAGMA table_info(vehicles)")}:
+        c.execute("ALTER TABLE vehicles ADD COLUMN fuel_type TEXT NOT NULL DEFAULT '' CHECK(fuel_type IN ('','Бензин','Дизель'))")
+    c.executescript(SCHEMA)
+    sync_links(c)
+
+def sync_links(c):
+    now=datetime.now().isoformat(timespec="microseconds")
+    for r in c.execute("""SELECT c.id, CASE WHEN c.archived=0 THEN e.id END employee_id, CASE WHEN c.archived=0 THEN v.id END vehicle_id, CASE WHEN c.archived=0 THEN COALESCE(v.fuel_type,'') ELSE '' END fuel_type FROM cards c LEFT JOIN employees e ON e.id=c.employee_id AND e.archived=0 LEFT JOIN vehicles v ON v.employee_id=e.id AND v.archived=0""").fetchall():
+        old=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_links WHERE card_id=? ORDER BY at DESC LIMIT 1",(r[0],)).fetchone()
+        value=tuple(r)[1:]
+        if old is None or tuple(old)!=value:
+            c.execute("INSERT INTO fuel_links(card_id,at,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?)",(r[0],now,*value))
+
+def category(product):
+    t=product.casefold()
+    return "Бензин" if "бензин" in t else "Дизель" if "дизель" in t or re.search(r"\bдт\b",t) else "Другое"
+
+def cents(value):
+    d=Decimal(str(value).replace(" ","").replace("\xa0","").replace(",","."))
+    if not d.is_finite() or abs(d)>1000000000: raise ValueError("Некорректное число")
+    return int((d*100).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+
+def stamp(day,clock):
+    if isinstance(day,datetime): day=day.date()
+    if not isinstance(day,date):
+        try: day=datetime.strptime(str(day).strip(),"%d.%m.%Y").date()
+        except ValueError: day=date.fromisoformat(str(day).strip())
+    if isinstance(clock,datetime): clock=clock.time()
+    if not isinstance(clock,time): clock=time.fromisoformat(str(clock).strip())
+    return datetime.combine(day,clock).isoformat(timespec="seconds")
+
+def parse_rows(rows):
+    card=None; result=[]
+    for i,raw in enumerate(rows,1):
+        r=(list(raw)+[None]*8)[:8]; label=str(r[0] or "").strip()
+        m=re.match(r"^Карта\s*№\s*(\d+)(?:\s|$)",label,re.I)
+        if m: card=m.group(1); continue
+        if re.match(r"^Карта\s*№",label,re.I): raise ValueError(f"Строка {i}: неверный номер карты")
+        if label.casefold() not in ("отгрузка","возврат"): continue
+        try:
+            if not card: raise ValueError("Нет номера карты")
+            op=label.casefold(); when=stamp(r[1],r[2]); station=str(r[3] or "").strip(); product=str(r[4] or "").strip()
+            price,qty,amount=map(cents,r[5:8])
+            if not station or not product or price<0 or (op=="возврат" and (qty>0 or amount>0)) or (op=="отгрузка" and (qty<0 or amount<0)): raise ValueError("Некорректная операция")
+            result.append((card,when,op,station,product,category(product),price,qty,amount))
+        except Exception as e: raise ValueError(f"Строка {i}: {e}") from e
+    return result
+
+def parse_file(name,blob):
+    result=[]
+    if name.lower().endswith(".xls"):
+        import xlrd
+        book=xlrd.open_workbook(file_contents=blob,on_demand=True)
+        try:
+            for sheet in book.sheets():
+                if sheet.nrows>100000 or sheet.ncols>256: raise ValueError("Слишком большая таблица")
+                def rows():
+                    for i in range(sheet.nrows):
+                        values=[]
+                        for cell in sheet.row(i):
+                            v=cell.value
+                            if cell.ctype==xlrd.XL_CELL_DATE:
+                                d=xlrd.xldate.xldate_as_datetime(v,book.datemode); v=d.time() if 0<=v<1 else d
+                            values.append(v)
+                        yield values
+                result.extend(parse_rows(rows()))
+        finally: book.release_resources()
+    elif name.lower().endswith(".xlsx"):
+        from openpyxl import load_workbook
+        with zipfile.ZipFile(BytesIO(blob)) as z:
+            if sum(x.file_size for x in z.infolist())>100*1024*1024: raise ValueError("Слишком большой архив")
+        book=load_workbook(BytesIO(blob),read_only=True,data_only=True,keep_links=False)
+        try:
+            for sheet in book.worksheets:
+                if (sheet.max_row or 0)>100000 or (sheet.max_column or 0)>256: raise ValueError("Слишком большая таблица")
+                result.extend(parse_rows(sheet.iter_rows(max_col=8,values_only=True)))
+        finally: book.close()
+    else: raise ValueError("Поддерживаются только XLS и XLSX")
+    return result
+
+def ingest(c,name,blob):
+    if not 0<len(blob)<=MAX_FILE: raise ValueError("Лимит файла 12 МБ")
+    name=name.replace("\\","/").rsplit("/",1)[-1][:200]; digest=sha256(blob).hexdigest()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        if c.execute("SELECT 1 FROM fuel_imports WHERE digest=?",(digest,)).fetchone():
+            c.rollback();return {"duplicate":True,"inserted":0,"skipped":0,"new_cards":0}
+        rows=parse_file(name,blob)
+        if not rows: raise ValueError("Не найдено операций")
+        ident=c.execute("INSERT INTO fuel_imports(filename,digest,imported_at,source) VALUES(?,?,?,?)",(name,digest,datetime.now().isoformat(timespec="seconds"),blob)).lastrowid
+        counts=Counter(); inserted=skipped=new_cards=0
+        for row in rows:
+            card=c.execute("SELECT id FROM cards WHERE number=?",(row[0],)).fetchone()
+            if card: card_id=card[0]
+            else:
+                card_id=c.execute("INSERT INTO cards(number) VALUES(?)",(row[0],)).lastrowid;new_cards+=1
+            sig=sha256(json.dumps(row,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
+            counts[sig]+=1
+            cur=c.execute("INSERT INTO fuel_operations(import_id,card_id,card_number,moment,operation,station,product,category,price,quantity,amount,signature,occurrence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(signature,occurrence) DO NOTHING",(ident,card_id,*row,sig,counts[sig]))
+            if cur.rowcount: inserted+=1
+            else: skipped+=1
+        sync_links(c)
+        c.execute("UPDATE fuel_imports SET inserted=?,skipped=? WHERE id=?",(inserted,skipped,ident))
+        c.commit();return {"duplicate":False,"inserted":inserted,"skipped":skipped,"new_cards":new_cards}
+    except BaseException: c.rollback();raise
+
+def add_period(c,d):
+    card,employee,vehicle=(d.get(k) for k in ("card_id","employee_id","vehicle_id"))
+    start=date.fromisoformat(d["start"]);end=date.fromisoformat(d["end"])+timedelta(days=1)
+    if end<=start or type(card) is not int or type(employee) is not int or (vehicle is not None and type(vehicle) is not int): raise ValueError("Неверный период или закрепление")
+    start=start.isoformat()+"T00:00:00";end=end.isoformat()+"T00:00:00"
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        if not c.execute("SELECT 1 FROM cards WHERE id=?",(card,)).fetchone() or not c.execute("SELECT 1 FROM employees WHERE id=?",(employee,)).fetchone(): raise ValueError("Запись не найдена")
+        v=c.execute("SELECT fuel_type FROM vehicles WHERE id=?",(vehicle,)).fetchone() if vehicle else None
+        if vehicle and not v: raise ValueError("Автомобиль не найден")
+        if c.execute("SELECT 1 FROM fuel_periods WHERE card_id=? AND start<? AND end>?",(card,end,start)).fetchone(): raise ValueError("Периоды пересекаются")
+        c.execute("INSERT INTO fuel_periods(card_id,start,end,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?,?)",(card,start,end,employee,vehicle,v[0] if v else ""))
+        c.commit()
+    except BaseException: c.rollback();raise
+
+def report(c,month=""):
+    if month and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])",month): raise ValueError("Некорректный месяц")
+    query="SELECT id,card_id,card_number,moment,operation,station,product,category,price,quantity,amount FROM fuel_operations"
+    rows=[dict(r) for r in c.execute(query+(" WHERE substr(moment,1,7)=?" if month else "")+" ORDER BY moment,id",(month,) if month else ())]
+    employees={r["id"]:" ".join(filter(None,(r["last_name"],r["first_name"],r["middle_name"]))) for r in c.execute("SELECT * FROM employees")}
+    vehicles={r["id"]:" ".join((r["make"],r["model"],r["plate"])) for r in c.execute("SELECT * FROM vehicles")}
+    for r in rows:
+        link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_periods WHERE card_id=? AND start<=? AND end>?",(r["card_id"],r["moment"],r["moment"])).fetchone()
+        if link is None: link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_links WHERE card_id=? AND at<=? ORDER BY at DESC LIMIT 1",(r["card_id"],r["moment"])).fetchone()
+        e,v,f=tuple(link) if link else (None,None,"")
+        r.update(employee_id=e,vehicle_id=v,employee=employees.get(e,""),vehicle=vehicles.get(v,""))
+        flags=[]
+        if not e: flags.append("Нет закрепления на дату")
+        elif not v: flags.append("Нет автомобиля на дату")
+        elif not f: flags.append("Не указан вид топлива автомобиля")
+        elif f!=r["category"]: flags.append("Несоответствие топлива")
+        if abs(r["price"]*r["quantity"]-r["amount"]*100)>100: flags.append("Цена × объём не совпадает с суммой")
+        r["flags"]=flags
+    return {"rows":rows,"months":[r[0] for r in c.execute("SELECT DISTINCT substr(moment,1,7) FROM fuel_operations ORDER BY 1 DESC")],"imports":[dict(r) for r in c.execute("SELECT id,filename,imported_at,inserted,skipped FROM fuel_imports ORDER BY id DESC")],"history":[dict(r) for r in c.execute("SELECT l.*,c.number FROM fuel_links l JOIN cards c ON c.id=l.card_id ORDER BY at DESC")],"periods":[dict(r) for r in c.execute("SELECT l.*,c.number FROM fuel_periods l JOIN cards c ON c.id=l.card_id ORDER BY start DESC")]}
+
+def export(c,month=""):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    rows=report(c,month)["rows"];wb=Workbook();ws=wb.active;ws.title="Операции"
+    def add(sheet,headers,values):
+        sheet.append(headers)
+        for cell in sheet[1]: cell.font=Font(bold=True,color="FFFFFF");cell.fill=PatternFill("solid",fgColor="324860")
+        for row in values:
+            sheet.append(row)
+            for cell in sheet[sheet.max_row]:
+                if isinstance(cell.value,str): cell.data_type="s"
+        sheet.freeze_panes="A2";sheet.auto_filter.ref=sheet.dimensions
+        for col in sheet.columns: sheet.column_dimensions[col[0].column_letter].width=min(55,max(14,max(len(str(x.value or "")) for x in col)+2))
+    add(ws,["Карта","Дата","Операция","Водитель","Автомобиль","АЗС","Топливо","Цена","Литры","Рубли","Замечания"],[[r["card_number"],r["moment"],r["operation"],r["employee"],r["vehicle"],r["station"],r["product"],r["price"]/100,r["quantity"]/100,r["amount"]/100,"; ".join(r["flags"])] for r in rows])
+    for name,key in (("Водители","employee"),("Автомобили","vehicle"),("Топливо","category")):
+        groups=defaultdict(lambda:[0,0,0])
+        for r in rows:
+            g=groups[r[key] or "Не определено"];g[0]+=1;g[1]+=r["quantity"];g[2]+=r["amount"]
+        add(wb.create_sheet(name),[name,"Операции","Литры","Рубли"],[[k,v[0],v[1]/100,v[2]/100] for k,v in sorted(groups.items())])
+    out=BytesIO();wb.save(out);return out.getvalue()
