@@ -1,6 +1,7 @@
 """Deterministic local automation. No network calls or automatic corrections."""
 from collections import Counter, defaultdict
 from datetime import date, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO
 import zipfile
@@ -31,7 +32,7 @@ def preview(c,name,blob):
             wb=load_workbook(BytesIO(blob),read_only=True,data_only=True,keep_links=False)
             try:
                 s=wb.worksheets[0]
-                if str(s["A7"].value).strip().casefold()=="гос номер" and str(s["E7"].value).strip()=="Пробег (км)":
+                if str(s["A7"].value).strip().casefold().replace(" ","")=="госномер" and str(s["E7"].value).strip()=="Пробег (км)":
                     return {"kind":"writeoff","format":ext,"message":"Месячная ведомость списания: откройте «Списание ГСМ» → импорт старого отчёта."}
             finally:wb.close()
         raise ValueError("Не обнаружены операции известного формата ведомости ГСМ")
@@ -68,6 +69,8 @@ def mileage_proposal(c,month,vid,p):
     evidence=[{"id":s["id"],"number":s["number"],"day":s["day"],"first":s["odo_first"],"last":s["odo_last"],"km":None if s["odo_first"] is None or s["odo_last"] is None or s["odo_last"]<s["odo_first"] else writeoff.rounded(s["odo_last"]-s["odo_first"])} for s in sheets]
     if any(s["km"] is None for s in evidence) or len({s["day"] for s in evidence})!=len(evidence):
         return {"km":None,"message":"Есть неполные, обратные или неоднозначно упорядоченные показания. Пробег нельзя достоверно предложить.","evidence":evidence}
+    if any(a["last"]>b["first"] for a,b in zip(evidence,evidence[1:])):
+        return {"km":None,"message":"Пересекающиеся показания одометра: риск двойного пробега. Нужна ручная проверка.","evidence":evidence}
     candidate=writeoff.rounded(sum(s["km"] for s in evidence))
     gap=any(a["last"]!=b["first"] for a,b in zip(evidence,evidence[1:]))
     return {"km":candidate,"message":("Есть разрывы показаний. Сумма пробегов только по представленным листам; проверьте полноту." if gap else "Сумма пробегов по представленным листам; подтвердите полноту и достоверность."),
@@ -85,15 +88,20 @@ def readiness(c,month):
         if z["actual"] is not None and z["actual"]<0:blocked.append("Отрицательный расход")
         if z["unconfirmed"]:blocked.append("Неподтверждённые операции")
         if not p.get("first_ref") or not p.get("last_ref"):blocked.append("Не указаны путевые листы")
+        if not r.get("closed"):
+            sheets=operations.waybills(c,month,x["id"])
+            refs={s["number"] for s in sheets}
+            if p.get("first_ref") not in refs or p.get("last_ref") not in refs:blocked.append("Первый или последний лист отсутствует в реестре")
+            if any(a["odo_last"] is not None and b["odo_first"] is not None and a["odo_last"]>b["odo_first"] for a,b in zip(sheets,sheets[1:])):blocked.append("Пересекающиеся показания путевых листов")
         for flag in z["flags"]:
             if flag in ("Нет подтверждённого остатка прошлого месяца","Использован скорректированный пробег вместо показаний одометра","Нет полного комплекта показаний одометра","Конечный одометр меньше начального"):
-                if (flag.startswith("Нет подтверждённого") and p.get("start") is not None) or (p.get("km_override") is not None and p.get("km_reason")):warnings.append(flag);continue
+                if (flag.startswith("Нет подтверждённого") and p.get("start") is not None) or (not flag.startswith("Нет подтверждённого") and p.get("km_override") is not None and p.get("km_reason")):warnings.append(flag);continue
             blocked.append(flag)
         # Distinguish flags from genuine confirmed mileage; never infer from fuel consumption.
         if z["difference"] is not None and z["difference"]>0:warnings.append("Перерасход: требуется пояснение")
         rows.append({"id":x["id"],"plate":x["plate"],"model":x["model"],"fuel_type":x["fuel_type"],"driver":x["driver"],
             "result":z,"blocked":list(dict.fromkeys(blocked)),"warnings":list(dict.fromkeys(warnings))})
-    return {"month":month,"unassigned":r["unassigned"],"rows":rows,
+    return {"month":month,"closed":r.get("closed",False),"unassigned":r["unassigned"],"rows":rows,
         "ready":bool(rows) and not r["unassigned"] and all(not x["blocked"] for x in rows),
         "review":sum(bool(x["warnings"]) for x in rows),"blocked":sum(bool(x["blocked"]) for x in rows)}
 
@@ -143,7 +151,7 @@ def price_trend(c,month):
     for product in sorted({k[1] for k in groups}):
         def price(m):
             qty,amount=groups.get((m,product),(0,0))
-            return writeoff.rounded(amount/qty*100/100) if qty else None
+            return writeoff.rounded(Decimal(amount)/Decimal(qty)) if qty else None
         old,new=price(prev),price(month)
         rows.append({"product":product,"category":fuel.category(product),"previous":old,"current":new,
             "difference":writeoff.rounded(new-old) if old is not None and new is not None else None,
