@@ -7,12 +7,14 @@ import math
 import sqlite3
 import webbrowser
 import threading
+from urllib.parse import urlsplit, parse_qs, quote
+import fuel
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "ogm.sqlite3"
 KINDS = {
     "employees": ("last_name", "first_name", "middle_name"),
-    "vehicles": ("make", "model", "plate", "employee_id", "summer", "winter", "insurance_start", "insurance_end"),
+    "vehicles": ("make", "model", "plate", "employee_id", "summer", "winter", "insurance_start", "insurance_end", "fuel_type"),
     "cards": ("number", "employee_id"),
 }
 SCHEMA = """
@@ -38,6 +40,7 @@ def initialize(path=DB):
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(connect(path)) as c, c:
         c.executescript(SCHEMA)
+        fuel.initialize(c)
 
 def snapshot(c):
     return {kind: [dict(r) for r in c.execute(f"SELECT * FROM {kind} ORDER BY id")] for kind in KINDS}
@@ -61,6 +64,10 @@ def clean(kind, data):
                 val = float(val)
                 if not math.isfinite(val) or val < 0:
                     raise ValueError("Норма должна быть неотрицательной")
+        elif key == "fuel_type":
+            val = val or ""
+            if val not in ("", "Бензин", "Дизель"):
+                raise ValueError("Выберите бензин или дизель")
         elif key.startswith("insurance_"):
             val = date.fromisoformat(val).isoformat() if val else None
         else:
@@ -109,6 +116,8 @@ def change(c, kind, data):
             employee = values.get("employee_id")
             if employee and not c.execute("SELECT 1 FROM employees WHERE id=? AND archived=0", (employee,)).fetchone():
                 raise ValueError("Сотрудник отсутствует или архивирован")
+            if kind == 'cards' and old and old['number'] != values['number'] and c.execute('SELECT 1 FROM fuel_operations WHERE card_id=?',(ident,)).fetchone():
+                raise ValueError('Нельзя изменить номер карты с операциями')
             keys = KINDS[kind]
             if old:
                 c.execute(f"UPDATE {kind} SET " + ",".join(k+"=?" for k in keys) + " WHERE id=?", (*values.values(), ident))
@@ -116,19 +125,22 @@ def change(c, kind, data):
                 c.execute(f"INSERT INTO {kind} (" + ",".join(keys) + ") VALUES (" + ",".join("?" for _ in keys) + ")", tuple(values.values()))
         else:
             raise ValueError("Неизвестное действие")
+        fuel.sync_links(c)
         c.commit()
     except BaseException:
         c.rollback()
         raise
 
 class Handler(BaseHTTPRequestHandler):
-    def send_data(self, status, payload, content_type="application/json; charset=utf-8"):
+    def send_data(self, status, payload, content_type="application/json; charset=utf-8", filename=None):
         if not isinstance(payload, bytes):
             payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(filename,safe=""))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'")
         self.end_headers()
@@ -144,7 +156,21 @@ class Handler(BaseHTTPRequestHandler):
             with closing(connect()) as c:
                 c.execute("BEGIN")
                 return self.send_data(200, snapshot(c))
-        assets = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"), "/app.js": ("app.js", "text/javascript")}
+        parts=urlsplit(self.path)
+        args=parse_qs(parts.query)
+        if parts.path in ("/api/fuel","/api/fuel/export","/api/fuel/source"):
+            try:
+                with closing(connect()) as c:
+                    c.execute("BEGIN")
+                    month=args.get("month",[""])[0]
+                    if parts.path=="/api/fuel": return self.send_data(200,fuel.report(c,month))
+                    if parts.path=="/api/fuel/export": return self.send_data(200,fuel.export(c,month),"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","OGM-GSM.xlsx")
+                    source=c.execute("SELECT filename,source FROM fuel_imports WHERE id=?",(int(args.get("id",["0"])[0]),)).fetchone()
+                    if not source: return self.send_data(404,{"error":"Файл не найден"})
+                    return self.send_data(200,source["source"],"application/octet-stream",source["filename"])
+            except (ValueError,TypeError): return self.send_data(400,{"error":"Некорректный запрос"})
+            except ImportError: return self.send_data(503,{"error":"Установите зависимости из requirements.txt"})
+        assets = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/fuel-ui.js": ("fuel-ui.js","text/javascript")}
         if self.path not in assets:
             return self.send_data(404, {"error":"Не найдено"})
         name, mime = assets[self.path]
@@ -156,6 +182,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.local_host() or self.headers.get("Origin") != f"http://127.0.0.1:{self.server.server_port}":
             return self.send_data(403, {"error":"Недопустимый источник"})
+        parts=urlsplit(self.path)
+        if parts.path in ("/api/fuel/import","/api/fuel/period"):
+            try:
+                size=int(self.headers.get("Content-Length","0"))
+                if not 0<size<=(fuel.MAX_FILE if parts.path.endswith("import") else 16384): raise ValueError("Недопустимый размер запроса")
+                body=self.rfile.read(size)
+                with closing(connect()) as c:
+                    if parts.path.endswith("import"):
+                        name=parse_qs(parts.query).get("name",[""])[0]
+                        return self.send_data(200,fuel.ingest(c,name,body))
+                    fuel.add_period(c,json.loads(body))
+                    return self.send_data(200,{"ok":True})
+            except ImportError: return self.send_data(503,{"error":"Установите зависимости из requirements.txt"})
+            except (ValueError,TypeError,KeyError,OverflowError) as e: return self.send_data(400,{"error":str(e)})
+            except sqlite3.Error: return self.send_data(409,{"error":"Ошибка записи в SQLite"})
+            except Exception: return self.send_data(400,{"error":"Файл не удалось прочитать. Проверьте формат ведомости."})
         kind = self.path.removeprefix("/api/")
         if self.path != "/api/"+kind or kind not in KINDS:
             return self.send_data(404, {"error":"Не найдено"})
