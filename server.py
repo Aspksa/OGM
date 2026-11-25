@@ -14,6 +14,8 @@ import operations
 import automation
 import maintenance
 import os
+import logging
+from logging.handlers import RotatingFileHandler
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "ogm.sqlite3"
@@ -48,6 +50,7 @@ def initialize(path=DB):
         fuel.initialize(c)
         writeoff.initialize(c)
         operations.initialize(c)
+        c.execute("PRAGMA user_version=6")
 
 def snapshot(c):
     return {kind: [dict(r) for r in c.execute(f"SELECT * FROM {kind} ORDER BY id")] for kind in KINDS}
@@ -337,23 +340,31 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     with maintenance.instance_lock(DB.parent):
-        run_server()
+        log=RotatingFileHandler(DB.parent/"ogm.log",maxBytes=2*1024*1024,backupCount=3,encoding="utf-8")
+        logging.basicConfig(level=logging.WARNING,handlers=[log],format="%(asctime)s %(levelname)s %(message)s")
+        try:run_server()
+        except Exception:
+            logging.exception("Server startup/runtime failure")
+            raise
 
 def run_server():
     if DB.exists():
         try: maintenance.daily(DB)
-        except (ValueError,sqlite3.Error,OSError) as e: print('Backup warning:',e,flush=True)
+        except (ValueError,sqlite3.Error,OSError) as e: logging.warning('Backup failure: %s',type(e).__name__);print('Backup warning:',e,flush=True)
     initialize()
     try: maintenance.daily(DB)
     except (ValueError,sqlite3.Error,OSError) as e: print('Backup warning:',e,flush=True)
     if not all((ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","operations-ui.js")):
         raise SystemExit("Build UI first: npm run build")
-    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+    # Stable origin keeps browser preferences; fallback if the port is occupied.
+    try: server=ThreadingHTTPServer(("127.0.0.1",8765),Handler)
+    except OSError: server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
+    with server:
         stop=threading.Event()
         def backup_loop():
             while not stop.wait(3600):
                 try: maintenance.daily(DB)
-                except (ValueError,sqlite3.Error,OSError) as e: print("Backup warning:",e,flush=True)
+                except (ValueError,sqlite3.Error,OSError) as e: logging.warning("Backup failure: %s",type(e).__name__);print("Backup warning:",e,flush=True)
         worker=threading.Thread(target=backup_loop,daemon=True)
         worker.start()
         url = f"http://127.0.0.1:{server.server_port}"
