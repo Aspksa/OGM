@@ -181,6 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                         result=operations.suggestion(c,month,vid,writeoff.stored(c,month,vid)[0])
                     elif kind=="analytics":result=operations.analytics(c,args.get("year",[str(date.today().year)])[0])
                     elif kind=="fuel":result=operations.fuel_stats(c,month)
+                    elif kind=="insurance":result=operations.insurance_calendar(c)
                     elif kind=="vehicle":result=operations.vehicle_detail(c,int(args.get("id",["0"])[0]))
                     elif kind=="card":result=operations.card_detail(c,int(args.get("id",["0"])[0]))
                     elif kind=="settings":result=operations.season_config(c)
