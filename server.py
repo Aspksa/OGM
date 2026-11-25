@@ -10,12 +10,15 @@ import threading
 from urllib.parse import urlsplit, parse_qs, quote
 import fuel
 import writeoff
+import operations
+import maintenance
+import os
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "ogm.sqlite3"
 KINDS = {
-    "employees": ("last_name", "first_name", "middle_name"),
-    "vehicles": ("make", "model", "plate", "employee_id", "summer", "winter", "insurance_start", "insurance_end", "fuel_type"),
+    "employees": ("last_name", "first_name", "middle_name", "department"),
+    "vehicles": ("make", "model", "plate", "employee_id", "summer", "winter", "insurance_start", "insurance_end", "fuel_type", "status"),
     "cards": ("number", "employee_id"),
 }
 SCHEMA = """
@@ -43,6 +46,7 @@ def initialize(path=DB):
         c.executescript(SCHEMA)
         fuel.initialize(c)
         writeoff.initialize(c)
+        operations.initialize(c)
 
 def snapshot(c):
     return {kind: [dict(r) for r in c.execute(f"SELECT * FROM {kind} ORDER BY id")] for kind in KINDS}
@@ -66,6 +70,10 @@ def clean(kind, data):
                 val = float(val)
                 if not math.isfinite(val) or val < 0:
                     raise ValueError("Норма должна быть неотрицательной")
+        elif key == "status":
+            val = val or "Работает"
+            if val not in ("Работает","Ремонт","Консервация","Списан"):
+                raise ValueError("Некорректный статус")
         elif key == "fuel_type":
             val = val or ""
             if val not in ("", "Бензин", "Дизель"):
@@ -128,6 +136,7 @@ def change(c, kind, data):
         else:
             raise ValueError("Неизвестное действие")
         fuel.sync_links(c)
+        operations.sync_history(c)
         c.commit()
     except BaseException:
         c.rollback()
@@ -160,6 +169,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_data(200, snapshot(c))
         parts=urlsplit(self.path)
         args=parse_qs(parts.query)
+        if parts.path.startswith("/api/ops/"):
+            try:
+                with closing(connect()) as c:
+                    c.execute("BEGIN")
+                    kind=parts.path.split("/")[-1]
+                    month=args.get("month",[""])[0]
+                    if kind=="waybills": result=operations.waybills(c,month)
+                    elif kind=="suggest":
+                        vid=int(args.get("id",["0"])[0])
+                        result=operations.suggestion(c,month,vid,writeoff.stored(c,month,vid)[0])
+                    elif kind=="analytics":result=operations.analytics(c,args.get("year",[str(date.today().year)])[0])
+                    elif kind=="fuel":result=operations.fuel_stats(c,month)
+                    elif kind=="vehicle":result=operations.vehicle_detail(c,int(args.get("id",["0"])[0]))
+                    elif kind=="card":result=operations.card_detail(c,int(args.get("id",["0"])[0]))
+                    elif kind=="settings":result=operations.season_config(c)
+                    elif kind=="audit":result=[dict(r) for r in c.execute("SELECT * FROM ogm_audit ORDER BY id DESC LIMIT 500")]
+                    elif kind=="diagnostics":
+                        result=operations.diagnostics(c)
+                        result["server"]="OK"
+                        result["ui"]={name:(ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","operations-ui.js")}
+                        result["backups"]=[p.name for p in sorted((DB.parent/"backups").glob("*.sqlite3"),reverse=True)]
+                    else:return self.send_data(404,{"error":"Не найдено"})
+                    return self.send_data(200,result)
+            except (ValueError,TypeError,KeyError,OverflowError) as e:return self.send_data(400,{"error":str(e)})
+            except sqlite3.Error:return self.send_data(503,{"error":"Ошибка базы"})
         if parts.path in ("/api/writeoff","/api/writeoff/export","/api/writeoff/source"):
             try:
                 with closing(connect()) as c:
@@ -185,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_data(200,source["source"],"application/octet-stream",source["filename"])
             except (ValueError,TypeError): return self.send_data(400,{"error":"Некорректный запрос"})
             except ImportError: return self.send_data(503,{"error":"Установите зависимости из requirements.txt"})
-        assets = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/fuel-ui.js": ("fuel-ui.js","text/javascript"), "/writeoff-ui.js": ("writeoff-ui.js","text/javascript")}
+        assets = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/fuel-ui.js": ("fuel-ui.js","text/javascript"), "/writeoff-ui.js": ("writeoff-ui.js","text/javascript"), "/operations-ui.js": ("operations-ui.js","text/javascript")}
         if self.path not in assets:
             return self.send_data(404, {"error":"Не найдено"})
         name, mime = assets[self.path]
@@ -198,6 +232,22 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local_host() or self.headers.get("Origin") != f"http://127.0.0.1:{self.server.server_port}":
             return self.send_data(403, {"error":"Недопустимый источник"})
         parts=urlsplit(self.path)
+        if parts.path in ("/api/ops/waybill","/api/ops/settings","/api/ops/backup"):
+            try:
+                size=int(self.headers.get("Content-Length","0"))
+                if not 0<size<=65536 or self.headers.get_content_type()!="application/json":raise ValueError("Некорректный запрос")
+                d=json.loads(self.rfile.read(size))
+                if not isinstance(d,dict):raise ValueError("Некорректный запрос")
+                with closing(connect()) as c:
+                    if parts.path.endswith("/waybill"):operations.save_waybill(c,d)
+                    elif parts.path.endswith("/settings"):operations.set_seasons(c,d)
+                    else:
+                        filename=maintenance.backup(DB).name
+                        with c:c.execute("INSERT INTO ogm_audit(at,entity,action,row_id) VALUES(?,?,?,?)",(writeoff.now(),"backup","CREATE",filename))
+                        return self.send_data(200,{"filename":filename})
+                return self.send_data(200,{"ok":True})
+            except (ValueError,TypeError,KeyError,OverflowError) as e:return self.send_data(400,{"error":str(e)})
+            except (sqlite3.Error,OSError):return self.send_data(409,{"error":"Ошибка записи или резервного копирования"})
         if parts.path in ("/api/writeoff/save","/api/writeoff/import"):
             try:
                 size=int(self.headers.get("Content-Length","0"))
@@ -248,10 +298,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_data(503, {"error":"Ошибка базы данных. Повторите попытку."})
 
 def main():
+    with maintenance.instance_lock(DB.parent):
+        run_server()
+
+def run_server():
+    if DB.exists():
+        try: maintenance.daily(DB)
+        except (ValueError,sqlite3.Error,OSError) as e: print('Backup warning:',e,flush=True)
     initialize()
+    try: maintenance.daily(DB)
+    except (ValueError,sqlite3.Error,OSError) as e: print('Backup warning:',e,flush=True)
     if not (ROOT/"static"/"app.js").is_file():
         raise SystemExit("Build UI first: npm run build")
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        stop=threading.Event()
+        def backup_loop():
+            while not stop.wait(3600):
+                try: maintenance.daily(DB)
+                except (ValueError,sqlite3.Error,OSError) as e: print("Backup warning:",e,flush=True)
+        worker=threading.Thread(target=backup_loop,daemon=True)
+        worker.start()
         url = f"http://127.0.0.1:{server.server_port}"
         print("OGM:", url, flush=True)
         threading.Timer(0.3, webbrowser.open, args=(url,)).start()
@@ -259,6 +325,9 @@ def main():
             server.serve_forever()
         except KeyboardInterrupt:
             pass
+        finally:
+            stop.set()
+            worker.join()
 
 if __name__ == "__main__":
     main()
