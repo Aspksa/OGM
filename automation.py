@@ -92,6 +92,8 @@ def readiness(c,month):
             sheets=operations.waybills(c,month,x["id"])
             refs={s["number"] for s in sheets}
             if p.get("first_ref") not in refs or p.get("last_ref") not in refs:blocked.append("Первый или последний лист отсутствует в реестре")
+            if sheets and (p.get("first_ref")!=sheets[0]["number"] or p.get("last_ref")!=sheets[-1]["number"]):blocked.append("Первый или последний лист не совпадает с реестром")
+            if len({s["day"] for s in sheets})!=len(sheets):blocked.append("Не подтверждён порядок нескольких путевых листов за день")
             if any(a["odo_last"] is not None and b["odo_first"] is not None and a["odo_last"]>b["odo_first"] for a,b in zip(sheets,sheets[1:])):blocked.append("Пересекающиеся показания путевых листов")
         for flag in z["flags"]:
             if flag in ("Нет подтверждённого остатка прошлого месяца","Использован скорректированный пробег вместо показаний одометра","Нет полного комплекта показаний одометра","Конечный одометр меньше начального"):
@@ -163,7 +165,7 @@ def export_review(c,month):
     r=readiness(c,month)
     wb=load_workbook(BytesIO(writeoff.export(c,month)))
     ws=wb.create_sheet("Проверка готовности",0)
-    ws.append(["Статус","Готово к проверке" if r["ready"] else "НЕ ГОТОВО — черновик"])
+    ws.append(["Статус","Закрытый период" if r.get("closed") else "Готово к проверке" if r["ready"] else "НЕ ГОТОВО — черновик"])
     ws.append(["Период",month]);ws.append(["Операций без автомобиля",r["unassigned"]])
     ws.append(["Госномер","Автомобиль","Блокирующие замечания","Требуют проверки"])
     for x in r["rows"]:
@@ -176,5 +178,5 @@ def export_review(c,month):
         for cell in row:cell.alignment=Alignment(vertical="top",wrap_text=True)
     for cell in ws[4]:cell.font=Font(bold=True)
     ws.freeze_panes="C5"
-    wb["Списание ГСМ"]["A6"]="За "+month+" — "+("проект к проверке" if r["ready"] else "НЕ ГОТОВО, черновик")
+    wb["Списание ГСМ"]["A6"]="За "+month+" — "+("закрытый период" if r.get("closed") else "проект к проверке" if r["ready"] else "НЕ ГОТОВО, черновик")
     wb.active=0;out=BytesIO();wb.save(out);wb.close();return out.getvalue()
