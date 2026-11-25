@@ -21,6 +21,9 @@ def initialize(c):
     if "fuel_type" not in {r[1] for r in c.execute("PRAGMA table_info(vehicles)")}:
         c.execute("ALTER TABLE vehicles ADD COLUMN fuel_type TEXT NOT NULL DEFAULT '' CHECK(fuel_type IN ('','Бензин','Дизель'))")
     c.executescript(SCHEMA)
+    cols={r[1] for r in c.execute("PRAGMA table_info(fuel_imports)")}
+    if "cancelled_at" not in cols:c.execute("ALTER TABLE fuel_imports ADD COLUMN cancelled_at TEXT")
+    c.execute("""CREATE TABLE IF NOT EXISTS fuel_corrections(id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, reason TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT)""")
     sync_links(c)
 
 def sync_links(c):
@@ -120,11 +123,17 @@ def ingest(c,name,blob):
     name=name.replace("\\","/").rsplit("/",1)[-1][:200]; digest=sha256(blob).hexdigest()
     c.execute("BEGIN IMMEDIATE")
     try:
-        if c.execute("SELECT 1 FROM fuel_imports WHERE digest=?",(digest,)).fetchone():
+        previous=c.execute("SELECT id,cancelled_at FROM fuel_imports WHERE digest=?",(digest,)).fetchone()
+        if previous and not previous["cancelled_at"]:
             c.rollback();return {"duplicate":True,"inserted":0,"skipped":0,"new_cards":0}
         rows=parse_file(name,blob)
         if not rows: raise ValueError("Не найдено операций")
-        ident=c.execute("INSERT INTO fuel_imports(filename,digest,imported_at,source) VALUES(?,?,?,?)",(name,digest,datetime.now().isoformat(timespec="seconds"),blob)).lastrowid
+        if previous:
+            ident=previous["id"]
+            c.execute("UPDATE fuel_imports SET cancelled_at=NULL,imported_at=?,filename=? WHERE id=?",(datetime.now().isoformat(timespec="microseconds"),name,ident))
+            c.execute("INSERT INTO fuel_corrections(at,kind,reason,before_json,after_json) VALUES(?,?,?,?,?)",(datetime.now().isoformat(),"restore_import","Повторная загрузка исходного файла",json.dumps(dict(previous)),json.dumps({"id":ident})))
+        else:
+            ident=c.execute("INSERT INTO fuel_imports(filename,digest,imported_at,source) VALUES(?,?,?,?)",(name,digest,datetime.now().isoformat(timespec="microseconds"),blob)).lastrowid
         counts=Counter(); inserted=skipped=new_cards=0
         for row in rows:
             card=c.execute("SELECT id FROM cards WHERE number=?",(row[0],)).fetchone()
@@ -142,7 +151,41 @@ def ingest(c,name,blob):
         c.commit();return {"duplicate":False,"inserted":inserted,"skipped":skipped,"new_cards":new_cards}
     except BaseException: c.rollback();raise
 
+def cancel_import(c,d):
+    ident=d.get("id");reason=d.get("reason")
+    if type(ident) is not int or not isinstance(reason,str) or not reason.strip() or len(reason)>500:raise ValueError("Укажите файл и основание отмены")
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        last=c.execute("SELECT id FROM fuel_imports WHERE cancelled_at IS NULL ORDER BY imported_at DESC,id DESC LIMIT 1").fetchone()
+        if not last or last[0]!=ident:raise ValueError("Отменять можно только последний действующий импорт: это защищает перекрывающиеся ведомости")
+        rows=[dict(r) for r in c.execute("SELECT * FROM fuel_operations WHERE import_id=?",(ident,))]
+        for m in {r["moment"][:7] for r in rows}:
+            if c.execute("SELECT 1 FROM writeoff_closures WHERE month=?",(m,)).fetchone():raise ValueError("Импорт затрагивает закрытый месяц")
+        at=datetime.now().isoformat(timespec="microseconds")
+        c.execute("INSERT INTO fuel_corrections(at,kind,reason,before_json) VALUES(?,?,?,?)",(at,"cancel_import",reason.strip(),json.dumps({"import_id":ident,"operations":rows},ensure_ascii=False)))
+        c.execute("DELETE FROM fuel_operations WHERE import_id=?",(ident,))
+        c.execute("UPDATE fuel_imports SET cancelled_at=? WHERE id=?",(at,ident))
+        c.commit()
+    except BaseException:c.rollback();raise
+
+def period_guard(c,start,end):
+    if c.execute("SELECT 1 FROM writeoff_closures WHERE month||'-01T00:00:00'<? AND date(month||'-01','+1 month')||'T00:00:00'>?",(end,start)).fetchone():raise ValueError("Период пересекает закрытый месяц")
+
 def add_period(c,d):
+    ident=d.get("id");action=d.get("action","save");reason=d.get("reason","")
+    if action not in ("save","delete"):raise ValueError("Неизвестное действие")
+    if ident is not None and (type(ident) is not int or not isinstance(reason,str) or not reason.strip() or len(reason)>500):raise ValueError("Укажите основание исправления периода")
+    if action=="delete":
+        if ident is None:raise ValueError("Период не выбран")
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            old=c.execute("SELECT * FROM fuel_periods WHERE id=?",(ident,)).fetchone()
+            if not old:raise ValueError("Период не найден")
+            period_guard(c,old["start"],old["end"])
+            c.execute("INSERT INTO fuel_corrections(at,kind,reason,before_json) VALUES(?,?,?,?)",(datetime.now().isoformat(),"delete_period",reason.strip(),json.dumps(dict(old),ensure_ascii=False)))
+            c.execute("DELETE FROM fuel_periods WHERE id=?",(ident,))
+            c.commit();return
+        except BaseException:c.rollback();raise
     card,employee,vehicle=(d.get(k) for k in ("card_id","employee_id","vehicle_id"))
     start=date.fromisoformat(d["start"]);end=date.fromisoformat(d["end"])+timedelta(days=1)
     if end<=start or type(card) is not int or type(employee) is not int or (vehicle is not None and type(vehicle) is not int): raise ValueError("Неверный период или закрепление")
@@ -153,8 +196,17 @@ def add_period(c,d):
         v=c.execute("SELECT fuel_type FROM vehicles WHERE id=?",(vehicle,)).fetchone() if vehicle else None
         if vehicle and not v: raise ValueError("Автомобиль не найден")
         if c.execute("SELECT 1 FROM writeoff_closures WHERE month||\'-01T00:00:00\'<? AND date(month||\'-01\',\'+1 month\')||\'T00:00:00\'>?",(end,start)).fetchone():raise ValueError("Период пересекает закрытый месяц")
-        if c.execute("SELECT 1 FROM fuel_periods WHERE card_id=? AND start<? AND end>?",(card,end,start)).fetchone(): raise ValueError("Периоды пересекаются")
-        c.execute("INSERT INTO fuel_periods(card_id,start,end,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?,?)",(card,start,end,employee,vehicle,v[0] if v else ""))
+        old=c.execute("SELECT * FROM fuel_periods WHERE id=?",(ident,)).fetchone() if ident is not None else None
+        if ident is not None:
+            if not old:raise ValueError("Период не найден")
+            period_guard(c,old["start"],old["end"])
+        if c.execute("SELECT 1 FROM fuel_periods WHERE card_id=? AND start<? AND end>? AND id!=?",(card,end,start,ident or 0)).fetchone(): raise ValueError("Периоды пересекаются")
+        values=(card,start,end,employee,vehicle,v[0] if v else "")
+        if old:
+            c.execute("UPDATE fuel_periods SET card_id=?,start=?,end=?,employee_id=?,vehicle_id=?,fuel_type=? WHERE id=?",(*values,ident))
+            new=c.execute("SELECT * FROM fuel_periods WHERE id=?",(ident,)).fetchone()
+            c.execute("INSERT INTO fuel_corrections(at,kind,reason,before_json,after_json) VALUES(?,?,?,?,?)",(datetime.now().isoformat(),"edit_period",reason.strip(),json.dumps(dict(old),ensure_ascii=False),json.dumps(dict(new),ensure_ascii=False)))
+        else:c.execute("INSERT INTO fuel_periods(card_id,start,end,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?,?)",values)
         c.commit()
     except BaseException: c.rollback();raise
 
@@ -175,7 +227,7 @@ def report(c,month=""):
         elif f!=r["category"]: flags.append("Несоответствие топлива")
         if abs(r["price"]*r["quantity"]-r["amount"]*100)>100: flags.append("Цена × объём не совпадает с суммой")
         r["flags"]=flags
-    return {"rows":rows,"months":[r[0] for r in c.execute("SELECT DISTINCT substr(moment,1,7) FROM fuel_operations ORDER BY 1 DESC")],"imports":[dict(r) for r in c.execute("SELECT id,filename,imported_at,inserted,skipped FROM fuel_imports ORDER BY id DESC")],"history":[dict(r) for r in c.execute("SELECT l.*,c.number FROM fuel_links l JOIN cards c ON c.id=l.card_id ORDER BY at DESC")],"periods":[dict(r) for r in c.execute("SELECT l.*,c.number FROM fuel_periods l JOIN cards c ON c.id=l.card_id ORDER BY start DESC")]}
+    return {"rows":rows,"months":[r[0] for r in c.execute("SELECT DISTINCT substr(moment,1,7) FROM fuel_operations ORDER BY 1 DESC")],"imports":[dict(r) for r in c.execute("SELECT id,filename,imported_at,inserted,skipped,cancelled_at FROM fuel_imports ORDER BY imported_at DESC,id DESC")],"history":[dict(r) for r in c.execute("SELECT l.*,c.number FROM fuel_links l JOIN cards c ON c.id=l.card_id ORDER BY at DESC")],"periods":[dict(r) for r in c.execute("SELECT l.*,c.number FROM fuel_periods l JOIN cards c ON c.id=l.card_id ORDER BY start DESC")]}
 
 def export(c,month=""):
     from openpyxl import Workbook
