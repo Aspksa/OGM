@@ -84,6 +84,10 @@ def stored(c,month,vid):
     row=c.execute("SELECT payload,revision FROM writeoff_months WHERE month=? AND vehicle_id=?",(month,vid)).fetchone()
     return (json.loads(row[0]),row[1]) if row else ({},0)
 
+def review_digest(rows,vid):
+    data=[(r["id"],r["card_id"],r["employee_id"],r["vehicle_id"],r["category"],r["quantity"],r["amount"]) for r in rows if r["vehicle_id"]==vid]
+    return sha256(json.dumps(data,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
+
 def previous(c,month,vid):
     start,_=month_bounds(month); prev=(start-timedelta(days=1)).strftime("%Y-%m")
     frozen=closure(c,prev)
@@ -143,9 +147,9 @@ def save(c,d):
         driver=c.execute("SELECT last_name,first_name,middle_name FROM employees WHERE id=?",(v["employee_id"],)).fetchone()
         p["identity"]=old.get("identity") or {"plate":v["plate"],"model":v["make"]+" "+v["model"],"fuel_type":v["fuel_type"],"driver":p.get("driver_label") or (" ".join(filter(None,driver)) if driver else "")}
         if p.get("start") is None:
-            p["start"]=previous(c,month,vid)
+            p["start"]=old.get("start") if old.get("start") is not None else previous(c,month,vid)
         if p["fuel_reviewed"]:
-            p["fuel_review_count"]=sum(r["vehicle_id"]==vid for r in fuel.report(c,month)["rows"])
+            p["fuel_review_digest"]=review_digest(fuel.report(c,month)["rows"],vid)
         raw=json.dumps(p,ensure_ascii=False)
         if rev:
             c.execute("UPDATE writeoff_months SET payload=?,revision=? WHERE month=? AND vehicle_id=?",(raw,rev+1,month,vid))
@@ -216,15 +220,16 @@ def report(c,month):
         kind=ident.get("fuel_type",v["fuel_type"])
         card=0;flags=[]
         if rev and not ident:flags.append("Исторические параметры автомобиля не подтверждены: пересохраните карточку после сверки")
-        if not rev and not by[v["id"]] and v["status"]=="Списан":continue
-        if not by[v["id"]] and not p.get("fuel_reviewed"):flags.append("Нет операций по картам: подтвердите полноту ведомости или отсутствие заправок")
-        if p.get("fuel_reviewed") and p.get("fuel_review_count") is not None and p["fuel_review_count"]!=len(by[v["id"]]):flags.append("Операции изменились после сверки")
+        if not rev and not by[v["id"]] and v["status"]=="Списан" and not c.execute("SELECT 1 FROM waybills WHERE vehicle_id=? AND substr(day,1,7)=? AND archived=0",(v["id"],month)).fetchone():continue
+        if not p.get("fuel_reviewed"):flags.append("Подтвердите полноту ведомости или отсутствие заправок")
+        elif p.get("fuel_review_digest")!=review_digest(by[v["id"]],v["id"]):flags.append("Операции изменились после сверки")
         for op in by[v["id"]]:
             if op["category"]==kind and kind: card+=op["quantity"]
             else: flags.append("Операция по карте с другим или неизвестным топливом исключена из баланса")
             if op["flags"]: flags.extend(op["flags"])
             if p.get("capacity") and op["quantity"]/100>p["capacity"]: flags.append("Заправка по карте превышает вместимость")
         driver=c.execute("SELECT last_name,first_name,middle_name FROM employees WHERE id=?",(v["employee_id"],)).fetchone()
+        if any(op["kind"]=="in" and any(t["category"]==op["fuel_type"] and t["moment"][:10]==op["date"] and t["quantity"]==round(op["liters"]*100) for t in by[v["id"]]) for op in p.get("manual",[])):flags.append("Возможный двойной учёт: ручная заправка совпадает с карточной по дате и объёму")
         rows.append({"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":calculate(p,card/100,kind,prev,flags)})
     sources=[{"id":r["id"],"name":r["name"],"rows":json.loads(r["rows_json"]),"at":r["at"]} for r in c.execute("SELECT * FROM writeoff_sources WHERE month=? ORDER BY id DESC",(month,))]
     audit=[dict(r) for r in c.execute("SELECT * FROM writeoff_audit WHERE month=? ORDER BY id DESC",(month,))]
