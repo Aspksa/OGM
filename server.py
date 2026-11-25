@@ -282,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_data(200,{"ok":True})
             except (ValueError,TypeError,KeyError,OverflowError) as e:return self.send_data(400,{"error":str(e)})
             except (sqlite3.Error,OSError):return self.send_data(409,{"error":"Ошибка записи или резервного копирования"})
-        if parts.path in ("/api/writeoff/save","/api/writeoff/import"):
+        if parts.path in ("/api/writeoff/save","/api/writeoff/import","/api/writeoff/month-action"):
             try:
                 size=int(self.headers.get("Content-Length","0"))
                 if not 0<size<=(fuel.MAX_FILE if parts.path.endswith("import") else 1024*1024): raise ValueError("Недопустимый размер запроса")
@@ -291,7 +291,10 @@ class Handler(BaseHTTPRequestHandler):
                     if parts.path.endswith("import"):
                         args=parse_qs(parts.query)
                         return self.send_data(200,writeoff.import_old(c,args.get("month",[""])[0],args.get("name",[""])[0],body))
-                    writeoff.save(c,json.loads(body))
+                    d=json.loads(body)
+                    if not isinstance(d,dict):raise ValueError("Некорректный запрос")
+                    if parts.path.endswith("/month-action"):writeoff.month_action(c,d.get("month"),d.get("action"),d.get("reason"))
+                    else:writeoff.save(c,d)
                     return self.send_data(200,{"ok":True})
             except (ValueError,TypeError,KeyError,OverflowError) as e: return self.send_data(400,{"error":str(e)})
             except sqlite3.Error: return self.send_data(409,{"error":"Ошибка записи SQLite"})
@@ -343,7 +346,7 @@ def run_server():
     initialize()
     try: maintenance.daily(DB)
     except (ValueError,sqlite3.Error,OSError) as e: print('Backup warning:',e,flush=True)
-    if not (ROOT/"static"/"app.js").is_file():
+    if not all((ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","operations-ui.js")):
         raise SystemExit("Build UI first: npm run build")
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
         stop=threading.Event()
