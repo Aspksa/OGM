@@ -12,8 +12,10 @@ SCHEMA="""
 CREATE TABLE IF NOT EXISTS fuel_imports(id INTEGER PRIMARY KEY, filename TEXT NOT NULL, digest TEXT UNIQUE NOT NULL, imported_at TEXT NOT NULL, source BLOB NOT NULL, inserted INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS fuel_operations(id INTEGER PRIMARY KEY, import_id INTEGER REFERENCES fuel_imports(id), card_id INTEGER REFERENCES cards(id), card_number TEXT NOT NULL, moment TEXT NOT NULL, operation TEXT NOT NULL, station TEXT NOT NULL, product TEXT NOT NULL, category TEXT NOT NULL, price INTEGER NOT NULL, quantity INTEGER NOT NULL, amount INTEGER NOT NULL, signature TEXT NOT NULL, occurrence INTEGER NOT NULL, UNIQUE(signature,occurrence));
 CREATE INDEX IF NOT EXISTS fuel_ops_moment ON fuel_operations(moment);
+CREATE INDEX IF NOT EXISTS fuel_ops_month ON fuel_operations(substr(moment,1,7));
 CREATE TABLE IF NOT EXISTS fuel_links(id INTEGER PRIMARY KEY, card_id INTEGER REFERENCES cards(id), at TEXT NOT NULL, employee_id INTEGER REFERENCES employees(id), vehicle_id INTEGER REFERENCES vehicles(id), fuel_type TEXT NOT NULL, UNIQUE(card_id,at));
 CREATE TABLE IF NOT EXISTS fuel_periods(id INTEGER PRIMARY KEY, card_id INTEGER REFERENCES cards(id), start TEXT NOT NULL, end TEXT NOT NULL, employee_id INTEGER REFERENCES employees(id), vehicle_id INTEGER REFERENCES vehicles(id), fuel_type TEXT NOT NULL, CHECK(start<end));
+CREATE INDEX IF NOT EXISTS fuel_periods_lookup ON fuel_periods(card_id,start,end);
 """
 def initialize(c):
     if "fuel_type" not in {r[1] for r in c.execute("PRAGMA table_info(vehicles)")}:
@@ -131,6 +133,7 @@ def ingest(c,name,blob):
                 card_id=c.execute("INSERT INTO cards(number) VALUES(?)",(row[0],)).lastrowid;new_cards+=1
             sig=signature(row)
             counts[sig]+=1
+            if c.execute("SELECT 1 FROM writeoff_closures WHERE month=?",(row[1][:7],)).fetchone() and not c.execute("SELECT 1 FROM fuel_operations WHERE signature=? AND occurrence=?",(sig,counts[sig])).fetchone():raise ValueError("Новые операции за закрытый месяц: "+row[1][:7])
             cur=c.execute("INSERT INTO fuel_operations(import_id,card_id,card_number,moment,operation,station,product,category,price,quantity,amount,signature,occurrence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(signature,occurrence) DO NOTHING",(ident,card_id,*row,sig,counts[sig]))
             if cur.rowcount: inserted+=1
             else: skipped+=1
@@ -149,6 +152,7 @@ def add_period(c,d):
         if not c.execute("SELECT 1 FROM cards WHERE id=?",(card,)).fetchone() or not c.execute("SELECT 1 FROM employees WHERE id=?",(employee,)).fetchone(): raise ValueError("Запись не найдена")
         v=c.execute("SELECT fuel_type FROM vehicles WHERE id=?",(vehicle,)).fetchone() if vehicle else None
         if vehicle and not v: raise ValueError("Автомобиль не найден")
+        if c.execute("SELECT 1 FROM writeoff_closures WHERE month||\'-01T00:00:00\'<? AND date(month||\'-01\',\'+1 month\')||\'T00:00:00\'>?",(end,start)).fetchone():raise ValueError("Период пересекает закрытый месяц")
         if c.execute("SELECT 1 FROM fuel_periods WHERE card_id=? AND start<? AND end>?",(card,end,start)).fetchone(): raise ValueError("Периоды пересекаются")
         c.execute("INSERT INTO fuel_periods(card_id,start,end,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?,?)",(card,start,end,employee,vehicle,v[0] if v else ""))
         c.commit()
