@@ -12,7 +12,7 @@ if not errorlevel 1 (
 if errorlevel 1 (
   %PY% -m pip install -r requirements.txt || goto fail
 )
-if not exist "static\fuel-ui.js" (
+if not exist "static\writeoff-ui.js" (
   call npm.cmd install --no-audit --no-fund || goto fail
   call npm.cmd run build || goto fail
 )
