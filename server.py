@@ -50,7 +50,7 @@ def initialize(path=DB):
         fuel.initialize(c)
         writeoff.initialize(c)
         operations.initialize(c)
-        c.execute("PRAGMA user_version=6")
+        c.execute("PRAGMA user_version=7")
 
 def snapshot(c):
     return {kind: [dict(r) for r in c.execute(f"SELECT * FROM {kind} ORDER BY id")] for kind in KINDS}
@@ -192,6 +192,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_data(200,result)
             except (ValueError,TypeError,KeyError,OverflowError) as e:return self.send_data(400,{"error":str(e)})
             except (sqlite3.Error,ImportError):return self.send_data(503,{"error":"Ошибка базы или зависимостей"})
+        if parts.path=="/api/ops/backup-download":
+            try:
+                name=args.get("name",[""])[0]
+                if Path(name).name!=name or not name.endswith(".sqlite3"):raise ValueError("Некорректное имя файла")
+                path=DB.parent/"backups"/name
+                if not path.is_file() or path.is_symlink():return self.send_data(404,{"error":"Копия не найдена"})
+                with closing(sqlite3.connect(path.resolve().as_uri()+"?mode=ro",uri=True)) as c:maintenance.validate(c)
+                return self.send_data(200,path.read_bytes(),"application/octet-stream",name)
+            except (ValueError,OSError,sqlite3.Error):return self.send_data(400,{"error":"Не удалось проверить резервную копию"})
         if parts.path.startswith("/api/ops/"):
             try:
                 with closing(connect()) as c:
@@ -214,6 +223,8 @@ class Handler(BaseHTTPRequestHandler):
                         result["server"]="OK"
                         result["ui"]={name:(ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","operations-ui.js")}
                         result["backups"]=[p.name for p in sorted((DB.parent/"backups").glob("*.sqlite3"),reverse=True)]
+                        result["schema_version"]=c.execute("PRAGMA user_version").fetchone()[0]
+                        result["last_backup"]=result["backups"][0] if result["backups"] else None
                     else:return self.send_data(404,{"error":"Не найдено"})
                     return self.send_data(200,result)
             except (ValueError,TypeError,KeyError,OverflowError) as e:return self.send_data(400,{"error":str(e)})
