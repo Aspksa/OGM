@@ -77,7 +77,11 @@ def save_waybill(c,d):
     if not isinstance(d,dict):raise ValueError("Некорректный лист")
     ident=d.get("id")
     if ident is not None and type(ident) is not int:raise ValueError("Некорректный ID")
+    c.execute("BEGIN IMMEDIATE")
     with c:
+        if ident:
+            old=c.execute("SELECT day FROM waybills WHERE id=?",(ident,)).fetchone()
+            if old:writeoff.ensure_open(c,old[0][:7])
         if d.get("action")=="archive":
             if not ident or not c.execute("UPDATE waybills SET archived=1 WHERE id=?",(ident,)).rowcount:raise ValueError("Лист не найден")
             return
@@ -87,6 +91,7 @@ def save_waybill(c,d):
         number=writeoff.text(d.get("number"),100)
         if not number:raise ValueError("Введите номер путевого листа")
         day=date.fromisoformat(d.get("day","")).isoformat()
+        writeoff.ensure_open(c,day[:7])
         values=(vid,employee,number,day,*[writeoff.number(d.get(k)) for k in ("odo_first","odo_last","fuel_first","fuel_last")],writeoff.text(d.get("note")))
         if ident:
             if not c.execute("UPDATE waybills SET vehicle_id=?,employee_id=?,number=?,day=?,odo_first=?,odo_last=?,fuel_first=?,fuel_last=?,note=? WHERE id=? AND archived=0",(*values,ident)).rowcount:raise ValueError("Лист не найден")
@@ -110,6 +115,7 @@ def suggestion(c,month,vid,p):
         if len({x["day"] for x in sheets})!=len(sheets):flags.append("Несколько листов за один день: проверьте порядок")
         for i,s in enumerate(sheets):
             if s["odo_first"] is not None and s["odo_last"] is not None and s["odo_last"]<s["odo_first"]:flags.append("Обратный одометр: "+s["number"])
+            if i and sheets[i-1]["fuel_last"] is not None and s["fuel_first"] is not None and abs(sheets[i-1]["fuel_last"]-s["fuel_first"])>.005:flags.append("Разрыв остатков топлива: "+s["number"])
             if i and sheets[i-1]["odo_last"] is not None and s["odo_first"] is not None and sheets[i-1]["odo_last"]!=s["odo_first"]:flags.append("Разрыв одометра: "+s["number"])
     else:flags.append("Нет путевых листов за месяц")
     prev=writeoff.previous(c,month,vid)

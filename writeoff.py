@@ -20,7 +20,42 @@ CREATE TABLE IF NOT EXISTS writeoff_sources(
  id INTEGER PRIMARY KEY, month TEXT NOT NULL, name TEXT NOT NULL, digest TEXT NOT NULL,
  source BLOB NOT NULL, rows_json TEXT NOT NULL, at TEXT NOT NULL, UNIQUE(month,digest));
 """
-def initialize(c): c.executescript(SCHEMA)
+def initialize(c):
+    c.executescript(SCHEMA)
+    c.execute("""CREATE TABLE IF NOT EXISTS writeoff_closures(
+       month TEXT PRIMARY KEY, snapshot TEXT NOT NULL, closed_at TEXT NOT NULL, reason TEXT NOT NULL)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS writeoff_versions(
+       id INTEGER PRIMARY KEY, month TEXT NOT NULL, snapshot TEXT NOT NULL, at TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL)""")
+
+def ensure_open(c,month):
+    if c.execute("SELECT 1 FROM writeoff_closures WHERE month=?",(month,)).fetchone():
+        raise ValueError("Месяц закрыт. Сначала откройте его с указанием причины.")
+
+def closure(c,month):
+    row=c.execute("SELECT snapshot,closed_at,reason FROM writeoff_closures WHERE month=?",(month,)).fetchone()
+    return (json.loads(row[0]),row[1],row[2]) if row else None
+
+def month_action(c,month,action,reason):
+    month_bounds(month);reason=text(reason)
+    if not reason:raise ValueError("Укажите основание")
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        if action=="close":
+            ensure_open(c,month)
+            import automation
+            check=automation.readiness(c,month)
+            if not check["ready"]:raise ValueError("Устраните блокирующие замечания перед закрытием")
+            r=report(c,month);raw=json.dumps(r,ensure_ascii=False)
+            c.execute("INSERT INTO writeoff_closures VALUES(?,?,?,?)",(month,raw,now(),reason))
+        elif action=="reopen":
+            old=closure(c,month)
+            if not old:raise ValueError("Месяц не закрыт")
+            raw=json.dumps(old[0],ensure_ascii=False)
+            c.execute("DELETE FROM writeoff_closures WHERE month=?",(month,))
+        else:raise ValueError("Неизвестное действие")
+        c.execute("INSERT INTO writeoff_versions(month,snapshot,at,action,reason) VALUES(?,?,?,?,?)",(month,raw,now(),action,reason))
+        c.commit()
+    except BaseException:c.rollback();raise
 
 def month_bounds(month):
     if not isinstance(month,str) or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])",month): raise ValueError("Выберите месяц")
@@ -49,8 +84,15 @@ def stored(c,month,vid):
     row=c.execute("SELECT payload,revision FROM writeoff_months WHERE month=? AND vehicle_id=?",(month,vid)).fetchone()
     return (json.loads(row[0]),row[1]) if row else ({},0)
 
+def review_digest(rows,vid):
+    data=[(r["id"],r["card_id"],r["employee_id"],r["vehicle_id"],r["category"],r["quantity"],r["amount"]) for r in rows if r["vehicle_id"]==vid]
+    return sha256(json.dumps(data,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
+
 def previous(c,month,vid):
     start,_=month_bounds(month); prev=(start-timedelta(days=1)).strftime("%Y-%m")
+    frozen=closure(c,prev)
+    if frozen:
+        return next((r["result"]["end"] for r in frozen[0]["rows"] if r["id"]==vid),None)
     p,_=stored(c,prev,vid)
     return p.get("end")
 
@@ -66,6 +108,9 @@ def clean(c,month,vid,d):
         out[k]=val
     if out["first_date"] and out["last_date"] and out["first_date"]>out["last_date"]: raise ValueError("Первый лист позже последнего")
     if out["km_override"] is not None and not out["km_reason"]: raise ValueError("Укажите причину корректировки пробега")
+    out["fuel_reviewed"]=d.get("fuel_reviewed") is True
+    out["fuel_review_reason"]=text(d.get("fuel_review_reason"))
+    if out["fuel_reviewed"] and not out["fuel_review_reason"]:raise ValueError("Укажите основание сверки заправок")
     out["season"]=d.get("season","")
     if out["season"] not in ("","summer","winter","split"): raise ValueError("Выберите сезон")
     ops=d.get("manual",[])
@@ -95,8 +140,16 @@ def save(c,d):
     p=clean(c,month,vid,d.get("payload"))
     c.execute("BEGIN IMMEDIATE")
     try:
+        ensure_open(c,month)
         old,rev=stored(c,month,vid)
         if type(d.get("revision")) is not int or d["revision"]!=rev: raise ValueError("Карточка изменена, обновите страницу")
+        v=c.execute("SELECT * FROM vehicles WHERE id=?",(vid,)).fetchone()
+        driver=c.execute("SELECT last_name,first_name,middle_name FROM employees WHERE id=?",(v["employee_id"],)).fetchone()
+        p["identity"]=old.get("identity") or {"plate":v["plate"],"model":v["make"]+" "+v["model"],"fuel_type":v["fuel_type"],"driver":p.get("driver_label") or (" ".join(filter(None,driver)) if driver else "")}
+        if p.get("start") is None:
+            p["start"]=old.get("start") if old.get("start") is not None else previous(c,month,vid)
+        if p["fuel_reviewed"]:
+            p["fuel_review_digest"]=review_digest(fuel.report(c,month)["rows"],vid)
         raw=json.dumps(p,ensure_ascii=False)
         if rev:
             c.execute("UPDATE writeoff_months SET payload=?,revision=? WHERE month=? AND vehicle_id=?",(raw,rev+1,month,vid))
@@ -123,7 +176,7 @@ def calculate(p,card,vehicle_fuel,prev,issues=()):
     km=p.get("km_override") if p.get("km_override") is not None else rawkm
     if km is None: flags.append("Пробег не определён")
     if rawkm is not None and p.get("km_override") is not None and abs(rawkm-km)>0.005: flags.append("Использован скорректированный пробег вместо показаний одометра")
-    if km==0 and initial is not None and end is not None and initial+card-end>0: flags.append("Нулевой пробег при изменении топливного баланса")
+
     if not p.get("first_ref") or not p.get("last_ref"): flags.append("Не указаны первый/последний путевые листы")
     ins=outs=unconfirmed=0
     for op in p.get("manual",[]):
@@ -132,23 +185,29 @@ def calculate(p,card,vehicle_fuel,prev,issues=()):
         if op["kind"]=="in": ins+=op["liters"]
         else: outs+=op["liters"]
         if capacity and op["liters"]>capacity and op["kind"]=="in": flags.append("Ручная заправка превышает вместимость")
-    actual=rounded(initial+card+ins-outs-end) if initial is not None and end is not None and vehicle_fuel else None
+    actual=rounded(Decimal(str(initial))+Decimal(str(card))+Decimal(str(ins))-Decimal(str(outs))-Decimal(str(end))) if initial is not None and end is not None and vehicle_fuel else None
+    if km==0 and actual is not None and actual>0:flags.append("Нулевой пробег при положительном расходе")
     if actual is not None and actual<0: flags.append("Отрицательный фактический расход: проверьте баланс")
     norm=None;season=p.get("season")
     if km is not None:
         if season in ("summer","winter"):
             rate=p.get(season+"_norm")
-            if rate is not None and rate>0: norm=rounded(km*rate/100)
+            if rate is not None and rate>0: norm=rounded(Decimal(str(km))*Decimal(str(rate))/100)
         elif season=="split":
             sk,wk,sn,wn=(p.get(k) for k in ("summer_km","winter_km","summer_norm","winter_norm"))
             if None not in (sk,wk,sn,wn) and sn>0 and wn>0:
                 if abs(sk+wk-km)>0.005: flags.append("Сумма сезонных пробегов не совпадает")
-                else: norm=rounded((sk*sn+wk*wn)/100)
+                else: norm=rounded((Decimal(str(sk))*Decimal(str(sn))+Decimal(str(wk))*Decimal(str(wn)))/100)
     if norm is None: flags.append("Не определён расход по норме")
     return {"start":initial,"end":end,"raw_km":rawkm,"km":km,"card":card,"manual_in":rounded(ins),"manual_out":rounded(outs),"unconfirmed":rounded(unconfirmed),"actual":actual,"norm":norm,"difference":rounded(actual-norm) if actual is not None and norm is not None else None,"flags":list(dict.fromkeys(flags))}
 
 def report(c,month):
-    month_bounds(month);ops=fuel.report(c,month)["rows"]
+    month_bounds(month)
+    frozen=closure(c,month)
+    if frozen:
+        r,at,reason=frozen
+        return {**r,"closed":True,"closed_at":at,"close_reason":reason}
+    ops=fuel.report(c,month)["rows"]
     by=defaultdict(list)
     for r in ops:
         if r["vehicle_id"]: by[r["vehicle_id"]].append(r)
@@ -157,29 +216,40 @@ def report(c,month):
         p,rev=stored(c,month,v["id"]);prev=previous(c,month,v["id"])
         if v["archived"] and not rev and not by[v["id"]]: continue
         p={"summer_norm":v["summer"],"winter_norm":v["winter"],**p}
+        ident=p.get("identity") or {}
+        kind=ident.get("fuel_type",v["fuel_type"])
         card=0;flags=[]
+        if rev and not ident:flags.append("Исторические параметры автомобиля не подтверждены: пересохраните карточку после сверки")
+        if not rev and not by[v["id"]] and v["status"]=="Списан" and not c.execute("SELECT 1 FROM waybills WHERE vehicle_id=? AND substr(day,1,7)=? AND archived=0",(v["id"],month)).fetchone():continue
+        if not p.get("fuel_reviewed"):flags.append("Подтвердите полноту ведомости или отсутствие заправок")
+        elif p.get("fuel_review_digest")!=review_digest(by[v["id"]],v["id"]):flags.append("Операции изменились после сверки")
         for op in by[v["id"]]:
-            if op["category"]==v["fuel_type"] and v["fuel_type"]: card+=op["quantity"]
+            if op["category"]==kind and kind: card+=op["quantity"]
             else: flags.append("Операция по карте с другим или неизвестным топливом исключена из баланса")
             if op["flags"]: flags.extend(op["flags"])
             if p.get("capacity") and op["quantity"]/100>p["capacity"]: flags.append("Заправка по карте превышает вместимость")
         driver=c.execute("SELECT last_name,first_name,middle_name FROM employees WHERE id=?",(v["employee_id"],)).fetchone()
-        rows.append({"id":v["id"],"plate":v["plate"],"model":v["make"]+" "+v["model"],"fuel_type":v["fuel_type"],"driver":" ".join(filter(None,driver)) if driver else "", "revision":rev,"payload":p,"previous":prev,"result":calculate(p,card/100,v["fuel_type"],prev,flags)})
+        if any(op["kind"]=="in" and any(t["category"]==op["fuel_type"] and t["moment"][:10]==op["date"] and t["quantity"]==round(op["liters"]*100) for t in by[v["id"]]) for op in p.get("manual",[])):flags.append("Возможный двойной учёт: ручная заправка совпадает с карточной по дате и объёму")
+        rows.append({"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":calculate(p,card/100,kind,prev,flags)})
     sources=[{"id":r["id"],"name":r["name"],"rows":json.loads(r["rows_json"]),"at":r["at"]} for r in c.execute("SELECT * FROM writeoff_sources WHERE month=? ORDER BY id DESC",(month,))]
     audit=[dict(r) for r in c.execute("SELECT * FROM writeoff_audit WHERE month=? ORDER BY id DESC",(month,))]
-    return {"month":month,"rows":rows,"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit}
+    return {"month":month,"rows":rows,"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit,"closed":False}
 
 def import_old(c,month,name,blob):
     month_bounds(month)
+    ensure_open(c,month)
     if not name.lower().endswith(".xlsx") or not 0<len(blob)<=fuel.MAX_FILE: raise ValueError("Нужен XLSX до 12 МБ")
     from openpyxl import load_workbook
     with zipfile.ZipFile(BytesIO(blob)) as z:
         if sum(x.file_size for x in z.infolist())>100*1024*1024: raise ValueError("Слишком большой архив")
     book=load_workbook(BytesIO(blob),read_only=True,data_only=True,keep_links=False)
     try:
-        ws=book.worksheets[0]
+        ws=book["Списание ГСМ"] if "Списание ГСМ" in book.sheetnames else book.worksheets[0]
+        title=" ".join(str(ws.cell(row=i,column=1).value or "") for i in range(1,7))
+        dates=set(re.findall(r"(?<!\\d)\\d{4}-(?:0[1-9]|1[0-2])(?!\\d)",title))
+        if dates and dates!={month}:raise ValueError("Период в заголовке не совпадает с выбранным месяцем")
         if ws.max_row>10000 or ws.max_column>256: raise ValueError("Слишком большая ведомость")
-        if str(ws["A7"].value).strip().lower()!="гос номер" or str(ws["E7"].value).strip()!="Пробег (км)": raise ValueError("Не соответствует образцу отчёта")
+        if str(ws["A7"].value).strip().casefold().replace(" ","")!="госномер" or str(ws["E7"].value).strip()!="Пробег (км)": raise ValueError("Не соответствует образцу отчёта")
         rows=[]
         for i,r in enumerate(ws.iter_rows(min_row=9,max_col=18,values_only=True),9):
             if str(r[0]).strip().upper()=="ИТОГО": break
@@ -197,7 +267,9 @@ def import_old(c,month,name,blob):
         if not rows: raise ValueError("Нет автомобилей")
     finally: book.close()
     digest=sha256(blob).hexdigest();name=name.replace("\\","/").rsplit("/",1)[-1][:200]
+    c.execute("BEGIN IMMEDIATE")
     with c:
+        ensure_open(c,month)
         cur=c.execute("INSERT INTO writeoff_sources(month,name,digest,source,rows_json,at) VALUES(?,?,?,?,?,?) ON CONFLICT(month,digest) DO NOTHING",(month,name,digest,blob,json.dumps(rows,ensure_ascii=False),now()))
     return {"rows":len(rows),"matched":sum(r["vehicle_id"] is not None for r in rows),"duplicate":not bool(cur.rowcount)}
 
@@ -209,7 +281,7 @@ def export(c,month):
     data=report(c,month);wb=Workbook();ws=wb.active;ws.title="Списание ГСМ"
     ws.merge_cells("I1:R2");ws["I1"]="Согласовано: __________________________"
     ws.merge_cells("A4:R4");ws["A4"]="АНАЛИЗ РАСХОДА ГСМ"
-    ws.merge_cells("A6:R6");ws["A6"]="За "+month
+    ws.merge_cells("A6:R6");ws["A6"]="За "+month+(" — закрытый период" if data.get("closed") else " — черновик")
     for col,label in [(1,"Госномер"),(2,"Модель"),(3,"Тип"),(4,"Фамилия, имя, отчество"),(5,"Пробег (км)"),(18,"Примечание")]:
         ws.merge_cells(start_row=7,start_column=col,end_row=8,end_column=col);ws.cell(7,col,label)
     for col,label in [(6,"Остаток на начало"),(8,"Заправка"),(10,"Расход факт"),(12,"Расход по норме"),(14,"Остаток на конец"),(16,"Слив / передача")]:

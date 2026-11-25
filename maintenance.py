@@ -49,7 +49,11 @@ def backup(db, label="manual"):
 def daily(db):
     folder=Path(db).parent/"backups";prefix=date.today().strftime("%Y%m%d")
     if folder.is_dir() and any(folder.glob(prefix+"-*-daily.sqlite3")):return None
-    return backup(db,"daily")
+    target=backup(db,"daily")
+    # Keep recent automatic copies; manual and pre-restore copies are never pruned.
+    copies=sorted(folder.glob("*-daily.sqlite3"),reverse=True)
+    for old in copies[30:]:old.unlink(missing_ok=True)
+    return target
 
 def restore(db,name):
     db=Path(db);folder=db.parent/"backups"

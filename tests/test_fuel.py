@@ -56,3 +56,34 @@ class FuelTests(unittest.TestCase):
     def test_return_sign(self):
         with self.assertRaises(ValueError):
             fuel.parse_rows([["Карта № 0001"],["Возврат","01.10.2026","12:00:00","АЗС","Дизель",70,2,140]])
+
+    def test_cancel_and_restore_last_import(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"test.db";initialize(path)
+            with closing(connect(path)) as c:
+                blob=fixture("xlsx")
+                fuel.ingest(c,"one.xlsx",blob)
+                fuel.ingest(c,"two.xls",fixture("xls"))
+                with self.assertRaises(ValueError):fuel.cancel_import(c,{"id":1,"reason":"test"})
+                fuel.cancel_import(c,{"id":2,"reason":"test"})
+                self.assertEqual(len(fuel.report(c)["rows"]),2)
+                fuel.cancel_import(c,{"id":1,"reason":"test"})
+                self.assertEqual(len(fuel.report(c)["rows"]),0)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM fuel_imports").fetchone()[0],2)
+                self.assertEqual(fuel.ingest(c,"one.xlsx",blob)["inserted"],2)
+                self.assertEqual(len(fuel.report(c)["rows"]),2)
+
+    def test_edit_and_delete_period(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"test.db";initialize(path)
+            with closing(connect(path)) as c:
+                fuel.ingest(c,"one.xlsx",fixture("xlsx"))
+                change(c,"employees",{"first_name":"Тест","last_name":"Тест"})
+                change(c,"vehicles",{"make":"Test","model":"A","plate":"A123AA","fuel_type":"Бензин","employee_id":1})
+                d={"card_id":1,"employee_id":1,"vehicle_id":1,"start":"2026-10-01","end":"2026-10-31"}
+                fuel.add_period(c,d)
+                fuel.add_period(c,{**d,"id":1,"start":"2026-10-02","reason":"Сверка"})
+                self.assertEqual(fuel.report(c,"2026-10")["rows"][0]["vehicle_id"],None)
+                fuel.add_period(c,{"id":1,"action":"delete","reason":"Сверка"})
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM fuel_periods").fetchone()[0],0)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM fuel_corrections").fetchone()[0],2)

@@ -14,6 +14,8 @@ import operations
 import automation
 import maintenance
 import os
+import logging
+from logging.handlers import RotatingFileHandler
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "ogm.sqlite3"
@@ -48,6 +50,7 @@ def initialize(path=DB):
         fuel.initialize(c)
         writeoff.initialize(c)
         operations.initialize(c)
+        c.execute("PRAGMA user_version=6")
 
 def snapshot(c):
     return {kind: [dict(r) for r in c.execute(f"SELECT * FROM {kind} ORDER BY id")] for kind in KINDS}
@@ -282,7 +285,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_data(200,{"ok":True})
             except (ValueError,TypeError,KeyError,OverflowError) as e:return self.send_data(400,{"error":str(e)})
             except (sqlite3.Error,OSError):return self.send_data(409,{"error":"Ошибка записи или резервного копирования"})
-        if parts.path in ("/api/writeoff/save","/api/writeoff/import"):
+        if parts.path in ("/api/writeoff/save","/api/writeoff/import","/api/writeoff/month-action"):
             try:
                 size=int(self.headers.get("Content-Length","0"))
                 if not 0<size<=(fuel.MAX_FILE if parts.path.endswith("import") else 1024*1024): raise ValueError("Недопустимый размер запроса")
@@ -291,13 +294,16 @@ class Handler(BaseHTTPRequestHandler):
                     if parts.path.endswith("import"):
                         args=parse_qs(parts.query)
                         return self.send_data(200,writeoff.import_old(c,args.get("month",[""])[0],args.get("name",[""])[0],body))
-                    writeoff.save(c,json.loads(body))
+                    d=json.loads(body)
+                    if not isinstance(d,dict):raise ValueError("Некорректный запрос")
+                    if parts.path.endswith("/month-action"):writeoff.month_action(c,d.get("month"),d.get("action"),d.get("reason"))
+                    else:writeoff.save(c,d)
                     return self.send_data(200,{"ok":True})
             except (ValueError,TypeError,KeyError,OverflowError) as e: return self.send_data(400,{"error":str(e)})
             except sqlite3.Error: return self.send_data(409,{"error":"Ошибка записи SQLite"})
             except ImportError: return self.send_data(503,{"error":"Установите зависимости"})
             except Exception: return self.send_data(400,{"error":"Не удалось обработать запрос или файл"})
-        if parts.path in ("/api/fuel/import","/api/fuel/period"):
+        if parts.path in ("/api/fuel/import","/api/fuel/period","/api/fuel/cancel"):
             try:
                 size=int(self.headers.get("Content-Length","0"))
                 if not 0<size<=(fuel.MAX_FILE if parts.path.endswith("import") else 16384): raise ValueError("Недопустимый размер запроса")
@@ -307,7 +313,10 @@ class Handler(BaseHTTPRequestHandler):
                         name=parse_qs(parts.query).get("name",[""])[0]
                         automation.file_kind(name,body)
                         return self.send_data(200,fuel.ingest(c,name,body))
-                    fuel.add_period(c,json.loads(body))
+                    d=json.loads(body)
+                    if not isinstance(d,dict):raise ValueError("Некорректный запрос")
+                    if parts.path.endswith("/cancel"):fuel.cancel_import(c,d)
+                    else:fuel.add_period(c,d)
                     return self.send_data(200,{"ok":True})
             except ImportError: return self.send_data(503,{"error":"Установите зависимости из requirements.txt"})
             except (ValueError,TypeError,KeyError,OverflowError) as e: return self.send_data(400,{"error":str(e)})
@@ -334,23 +343,31 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     with maintenance.instance_lock(DB.parent):
-        run_server()
+        log=RotatingFileHandler(DB.parent/"ogm.log",maxBytes=2*1024*1024,backupCount=3,encoding="utf-8")
+        logging.basicConfig(level=logging.WARNING,handlers=[log],format="%(asctime)s %(levelname)s %(message)s")
+        try:run_server()
+        except Exception:
+            logging.exception("Server startup/runtime failure")
+            raise
 
 def run_server():
     if DB.exists():
         try: maintenance.daily(DB)
-        except (ValueError,sqlite3.Error,OSError) as e: print('Backup warning:',e,flush=True)
+        except (ValueError,sqlite3.Error,OSError) as e: logging.warning('Backup failure: %s',type(e).__name__);print('Backup warning:',e,flush=True)
     initialize()
     try: maintenance.daily(DB)
     except (ValueError,sqlite3.Error,OSError) as e: print('Backup warning:',e,flush=True)
-    if not (ROOT/"static"/"app.js").is_file():
+    if not all((ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","operations-ui.js")):
         raise SystemExit("Build UI first: npm run build")
-    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+    # Stable origin keeps browser preferences; fallback if the port is occupied.
+    try: server=ThreadingHTTPServer(("127.0.0.1",8765),Handler)
+    except OSError: server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
+    with server:
         stop=threading.Event()
         def backup_loop():
             while not stop.wait(3600):
                 try: maintenance.daily(DB)
-                except (ValueError,sqlite3.Error,OSError) as e: print("Backup warning:",e,flush=True)
+                except (ValueError,sqlite3.Error,OSError) as e: logging.warning("Backup failure: %s",type(e).__name__);print("Backup warning:",e,flush=True)
         worker=threading.Thread(target=backup_loop,daemon=True)
         worker.start()
         url = f"http://127.0.0.1:{server.server_port}"
