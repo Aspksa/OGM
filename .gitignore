@@ -6,3 +6,5 @@ __pycache__/
 *.log
 
 static/fuel-ui.js
+
+static/writeoff-ui.js

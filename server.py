@@ -9,6 +9,7 @@ import webbrowser
 import threading
 from urllib.parse import urlsplit, parse_qs, quote
 import fuel
+import writeoff
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "ogm.sqlite3"
@@ -41,6 +42,7 @@ def initialize(path=DB):
     with closing(connect(path)) as c, c:
         c.executescript(SCHEMA)
         fuel.initialize(c)
+        writeoff.initialize(c)
 
 def snapshot(c):
     return {kind: [dict(r) for r in c.execute(f"SELECT * FROM {kind} ORDER BY id")] for kind in KINDS}
@@ -158,6 +160,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_data(200, snapshot(c))
         parts=urlsplit(self.path)
         args=parse_qs(parts.query)
+        if parts.path in ("/api/writeoff","/api/writeoff/export","/api/writeoff/source"):
+            try:
+                with closing(connect()) as c:
+                    c.execute("BEGIN")
+                    month=args.get("month",[""])[0]
+                    if parts.path=="/api/writeoff": return self.send_data(200,writeoff.report(c,month))
+                    if parts.path=="/api/writeoff/export": return self.send_data(200,writeoff.export(c,month),"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","OGM-writeoff-"+month+".xlsx")
+                    source=c.execute("SELECT name,source FROM writeoff_sources WHERE id=?",(int(args.get("id",["0"])[0]),)).fetchone()
+                    if not source: return self.send_data(404,{"error":"Файл не найден"})
+                    return self.send_data(200,source["source"],"application/octet-stream",source["name"])
+            except (ValueError,TypeError): return self.send_data(400,{"error":"Некорректный запрос"})
+            except ImportError: return self.send_data(503,{"error":"Установите зависимости"})
+            except sqlite3.Error: return self.send_data(503,{"error":"Ошибка базы данных"})
         if parts.path in ("/api/fuel","/api/fuel/export","/api/fuel/source"):
             try:
                 with closing(connect()) as c:
@@ -170,7 +185,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_data(200,source["source"],"application/octet-stream",source["filename"])
             except (ValueError,TypeError): return self.send_data(400,{"error":"Некорректный запрос"})
             except ImportError: return self.send_data(503,{"error":"Установите зависимости из requirements.txt"})
-        assets = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/fuel-ui.js": ("fuel-ui.js","text/javascript")}
+        assets = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/fuel-ui.js": ("fuel-ui.js","text/javascript"), "/writeoff-ui.js": ("writeoff-ui.js","text/javascript")}
         if self.path not in assets:
             return self.send_data(404, {"error":"Не найдено"})
         name, mime = assets[self.path]
@@ -183,6 +198,21 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local_host() or self.headers.get("Origin") != f"http://127.0.0.1:{self.server.server_port}":
             return self.send_data(403, {"error":"Недопустимый источник"})
         parts=urlsplit(self.path)
+        if parts.path in ("/api/writeoff/save","/api/writeoff/import"):
+            try:
+                size=int(self.headers.get("Content-Length","0"))
+                if not 0<size<=(fuel.MAX_FILE if parts.path.endswith("import") else 1024*1024): raise ValueError("Недопустимый размер запроса")
+                body=self.rfile.read(size)
+                with closing(connect()) as c:
+                    if parts.path.endswith("import"):
+                        args=parse_qs(parts.query)
+                        return self.send_data(200,writeoff.import_old(c,args.get("month",[""])[0],args.get("name",[""])[0],body))
+                    writeoff.save(c,json.loads(body))
+                    return self.send_data(200,{"ok":True})
+            except (ValueError,TypeError,KeyError,OverflowError) as e: return self.send_data(400,{"error":str(e)})
+            except sqlite3.Error: return self.send_data(409,{"error":"Ошибка записи SQLite"})
+            except ImportError: return self.send_data(503,{"error":"Установите зависимости"})
+            except Exception: return self.send_data(400,{"error":"Не удалось обработать запрос или файл"})
         if parts.path in ("/api/fuel/import","/api/fuel/period"):
             try:
                 size=int(self.headers.get("Content-Length","0"))
