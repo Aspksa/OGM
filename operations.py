@@ -128,8 +128,14 @@ def suggestion(c,month,vid,p):
                 if abs(sum(sums.values())-km)<.005:result.update(season="split",summer_km=round(sums["summer"],2),winter_km=round(sums["winter"],2))
             if "season" not in result:flags.append("Переходный месяц: подтвердите сезонные пробеги вручную")
         else:flags.append("Не настроены даты сезонных норм")
-    for k,col in (("summer_norm","summer"),("winter_norm","winter")):
-        if p.get(k) is None and v[col] is not None:result[k]=v[col]
+    # Historical changes are observed from installation, not backdated.
+    start,end=writeoff.month_bounds(month)
+    history=c.execute("SELECT summer,winter FROM vehicle_history WHERE vehicle_id=? AND at<? ORDER BY at DESC LIMIT 1",(vid,start.isoformat()+"T00:00:00")).fetchone()
+    changed=c.execute("SELECT COUNT(*) FROM vehicle_history WHERE vehicle_id=? AND at>=? AND at<?",(vid,start.isoformat()+"T00:00:00",end.isoformat()+"T00:00:00")).fetchone()[0]
+    if history and not changed:
+        for k,col in (("summer_norm","summer"),("winter_norm","winter")):
+            if p.get(k) is None and history[col] is not None:result[k]=history[col]
+    else:flags.append("История норм за период неполная или нормы изменялись: проверьте вручную")
     return {"fields":result,"flags":flags,"waybills":len(sheets)}
 
 def month_list(c,year):
@@ -157,6 +163,14 @@ def analytics(c,year):
             z=x["result"]
             if z["flags"]:missing.append({"month":current,"plate":x["plate"],"model":x["model"],"flags":z["flags"]})
     return {"months":out,"vehicles":vehicle_rows,"over":over,"missing":missing}
+
+def insurance_calendar(c):
+    today=date.today()
+    result=[]
+    for r in c.execute("SELECT id,plate,make,model,insurance_start,insurance_end,status FROM vehicles WHERE archived=0 AND status!='Списан' ORDER BY insurance_end IS NULL,insurance_end,plate"):
+        days=(date.fromisoformat(r["insurance_end"])-today).days if r["insurance_end"] else None
+        result.append({**dict(r),"days":days,"state":"Не указана" if days is None else "Истекла" if days<0 else "До 30 дней" if days<=30 else "Действует"})
+    return result
 
 def fuel_stats(c,month):
     rows=fuel.report(c,month)["rows"];stations=defaultdict(lambda:[0,0,0]);prices=defaultdict(lambda:[0,0]);alerts=[];perday=Counter()
