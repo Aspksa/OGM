@@ -34,10 +34,12 @@ def validate(c):
     tables={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not {"employees","vehicles","cards","fuel_operations","writeoff_months"}<=tables:raise ValueError("Not an OGM database")
 
-def backup(db, label="manual"):
+def backup(db, label="manual", destination=None):
     db=Path(db)
     if not db.is_file():raise ValueError("Database does not exist")
-    directory=db.parent/"backups";directory.mkdir(exist_ok=True)
+    directory=Path(destination).resolve() if destination is not None else db.parent/"backups"
+    if destination is not None and not directory.is_dir():raise ValueError("External backup directory does not exist")
+    directory.mkdir(exist_ok=True)
     target=directory/(datetime.now().strftime("%Y%m%d-%H%M%S-%f")+"-"+label+".sqlite3")
     tmp=target.with_suffix(".tmp")
     try:
@@ -77,9 +79,10 @@ if __name__=="__main__":
     try:
         with instance_lock(db.parent):
             if len(sys.argv)==2 and sys.argv[1]=="backup":print(backup(db))
+            elif len(sys.argv)==3 and sys.argv[1]=="backup-to":print(backup(db,"external",sys.argv[2]))
             elif len(sys.argv)==3 and sys.argv[1]=="restore":
                 restore(db,sys.argv[2]);print("Restore complete. Start OGM.")
             elif len(sys.argv)==2 and sys.argv[1]=="list":
                 for p in sorted((db.parent/"backups").glob("*.sqlite3"),reverse=True):print(p.name)
-            else:raise ValueError("Usage: maintenance.py backup | list | restore BACKUP.sqlite3")
+            else:raise ValueError("Usage: maintenance.py backup | backup-to DIRECTORY | list | restore BACKUP.sqlite3")
     except (OSError,RuntimeError,ValueError,sqlite3.Error) as e:print("ERROR:",e,file=sys.stderr);sys.exit(1)
