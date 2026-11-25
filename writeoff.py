@@ -244,7 +244,10 @@ def import_old(c,month,name,blob):
         if sum(x.file_size for x in z.infolist())>100*1024*1024: raise ValueError("Слишком большой архив")
     book=load_workbook(BytesIO(blob),read_only=True,data_only=True,keep_links=False)
     try:
-        ws=book.worksheets[0]
+        ws=book["Списание ГСМ"] if "Списание ГСМ" in book.sheetnames else book.worksheets[0]
+        title=" ".join(str(ws.cell(row=i,column=1).value or "") for i in range(1,7))
+        dates=set(re.findall(r"(?<!\\d)\\d{4}-(?:0[1-9]|1[0-2])(?!\\d)",title))
+        if dates and dates!={month}:raise ValueError("Период в заголовке не совпадает с выбранным месяцем")
         if ws.max_row>10000 or ws.max_column>256: raise ValueError("Слишком большая ведомость")
         if str(ws["A7"].value).strip().casefold().replace(" ","")!="госномер" or str(ws["E7"].value).strip()!="Пробег (км)": raise ValueError("Не соответствует образцу отчёта")
         rows=[]
@@ -264,6 +267,7 @@ def import_old(c,month,name,blob):
         if not rows: raise ValueError("Нет автомобилей")
     finally: book.close()
     digest=sha256(blob).hexdigest();name=name.replace("\\","/").rsplit("/",1)[-1][:200]
+    c.execute("BEGIN IMMEDIATE")
     with c:
         ensure_open(c,month)
         cur=c.execute("INSERT INTO writeoff_sources(month,name,digest,source,rows_json,at) VALUES(?,?,?,?,?,?) ON CONFLICT(month,digest) DO NOTHING",(month,name,digest,blob,json.dumps(rows,ensure_ascii=False),now()))
@@ -277,7 +281,7 @@ def export(c,month):
     data=report(c,month);wb=Workbook();ws=wb.active;ws.title="Списание ГСМ"
     ws.merge_cells("I1:R2");ws["I1"]="Согласовано: __________________________"
     ws.merge_cells("A4:R4");ws["A4"]="АНАЛИЗ РАСХОДА ГСМ"
-    ws.merge_cells("A6:R6");ws["A6"]="За "+month
+    ws.merge_cells("A6:R6");ws["A6"]="За "+month+(" — закрытый период" if data.get("closed") else " — черновик")
     for col,label in [(1,"Госномер"),(2,"Модель"),(3,"Тип"),(4,"Фамилия, имя, отчество"),(5,"Пробег (км)"),(18,"Примечание")]:
         ws.merge_cells(start_row=7,start_column=col,end_row=8,end_column=col);ws.cell(7,col,label)
     for col,label in [(6,"Остаток на начало"),(8,"Заправка"),(10,"Расход факт"),(12,"Расход по норме"),(14,"Остаток на конец"),(16,"Слив / передача")]:
