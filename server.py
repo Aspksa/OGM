@@ -227,7 +227,7 @@ class Handler(BaseHTTPRequestHandler):
                     elif kind=="diagnostics":
                         result=operations.diagnostics(c)
                         result["server"]="OK"
-                        result["ui"]={name:(ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","operations-ui.js")}
+                        result["ui"]={name:(ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","writeoff-design.js","operations-ui.js")}
                         result["backups"]=[p.name for p in sorted((DB.parent/"backups").glob("*.sqlite3"),reverse=True)]
                         result["schema_version"]=c.execute("PRAGMA user_version").fetchone()[0]
                         result["last_backup"]=result["backups"][0] if result["backups"] else None
@@ -260,7 +260,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_data(200,source["source"],"application/octet-stream",source["filename"])
             except (ValueError,TypeError): return self.send_data(400,{"error":"Некорректный запрос"})
             except ImportError: return self.send_data(503,{"error":"Установите зависимости из requirements.txt"})
-        assets = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/fuel-ui.js": ("fuel-ui.js","text/javascript"), "/writeoff-ui.js": ("writeoff-ui.js","text/javascript"), "/operations-ui.js": ("operations-ui.js","text/javascript")}
+        assets = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"), "/app.js": ("app.js", "text/javascript"), "/fuel-ui.js": ("fuel-ui.js","text/javascript"), "/writeoff-ui.js": ("writeoff-ui.js","text/javascript"), "/writeoff-design.js": ("writeoff-design.js","text/javascript"), "/operations-ui.js": ("operations-ui.js","text/javascript")}
         if self.path not in assets:
             return self.send_data(404, {"error":"Не найдено"})
         name, mime = assets[self.path]
@@ -376,7 +376,7 @@ def run_server():
     initialize()
     try: maintenance.daily(DB)
     except (ValueError,sqlite3.Error,OSError) as e: print('Backup warning:',e,flush=True)
-    if not all((ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","operations-ui.js")):
+    if not all((ROOT/"static"/name).is_file() for name in ("app.js","fuel-ui.js","writeoff-ui.js","writeoff-design.js","operations-ui.js")):
         raise SystemExit("Build UI first: npm run build")
     # Stable origin keeps browser preferences; fallback if the port is occupied.
     try: server=ThreadingHTTPServer(("127.0.0.1",8765),Handler)
