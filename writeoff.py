@@ -335,11 +335,10 @@ def report(c,month):
             result["actual"]=None;result["difference"]=None
             result["flags"]=[f for f in result["flags"] if not f.startswith("Отрицательный фактический расход") and f!="Нулевой пробег при положительном расходе"]
             result["flags"].append("Фактический расход ожидает подтверждения заправок")
-        auto_season=""
-        if not p.get("season"):
-            import operations
-            suggestion=operations.suggestion(c,month,v["id"],p)["fields"]
-            if suggestion.get("season") in ("summer","winter"):auto_season=suggestion["season"]
+        import operations
+        suggestion=operations.suggestion(c,month,v["id"],{**p,"season":""})["fields"]
+        auto_season=suggestion.get("season","")
+        if auto_season not in ("summer","winter"):auto_season=""
         rows.append({"previous_odo":previous_odo(c,month,v["id"]),"auto_season":auto_season,"current_cards":candidates,"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":result})
     sources=[{"id":r["id"],"name":r["name"],"rows":json.loads(r["rows_json"]),"at":r["at"]} for r in c.execute("SELECT * FROM writeoff_sources WHERE month=? ORDER BY id DESC",(month,))]
     audit=[dict(r) for r in c.execute("SELECT * FROM writeoff_audit WHERE month=? ORDER BY id DESC",(month,))]
