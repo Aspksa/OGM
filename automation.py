@@ -87,15 +87,17 @@ def readiness(c,month):
             if z[key] is None:blocked.append(label+": нет данных")
         if z["actual"] is not None and z["actual"]<0:blocked.append("Отрицательный расход")
         if z["unconfirmed"]:blocked.append("Неподтверждённые операции")
-        if not p.get("first_ref") or not p.get("last_ref"):blocked.append("Не указаны путевые листы")
+        monthly=p.get("input_mode")=="monthly"
+        if not monthly and (not p.get("first_ref") or not p.get("last_ref")):blocked.append("Не указаны путевые листы")
         if not r.get("closed"):
             sheets=operations.waybills(c,month,x["id"])
             refs={s["number"] for s in sheets}
-            if p.get("first_ref") not in refs or p.get("last_ref") not in refs:blocked.append("Первый или последний лист отсутствует в реестре")
-            if sheets and (p.get("first_ref")!=sheets[0]["number"] or p.get("last_ref")!=sheets[-1]["number"]):blocked.append("Первый или последний лист не совпадает с реестром")
+            if (not monthly or p.get("first_ref") or p.get("last_ref")) and (p.get("first_ref") not in refs or p.get("last_ref") not in refs):blocked.append("Первый или последний лист отсутствует в реестре")
+            if sheets and (not monthly or p.get("first_ref") or p.get("last_ref")) and (p.get("first_ref")!=sheets[0]["number"] or p.get("last_ref")!=sheets[-1]["number"]):blocked.append("Первый или последний лист не совпадает с реестром")
             if len({s["day"] for s in sheets})!=len(sheets):blocked.append("Не подтверждён порядок нескольких путевых листов за день")
             if any(a["odo_last"] is not None and b["odo_first"] is not None and a["odo_last"]>b["odo_first"] for a,b in zip(sheets,sheets[1:])):blocked.append("Пересекающиеся показания путевых листов")
         for flag in z["flags"]:
+            if monthly and flag=="Не указана вместимость бака":warnings.append(flag);continue
             if flag in ("Нет подтверждённого остатка прошлого месяца","Использован скорректированный пробег вместо показаний одометра","Нет полного комплекта показаний одометра","Конечный одометр меньше начального"):
                 if (flag.startswith("Нет подтверждённого") and p.get("start") is not None) or (not flag.startswith("Нет подтверждённого") and p.get("km_override") is not None and p.get("km_reason")):warnings.append(flag);continue
             blocked.append(flag)

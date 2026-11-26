@@ -108,6 +108,8 @@ def clean(c,month,vid,d):
         out[k]=val
     if out["first_date"] and out["last_date"] and out["first_date"]>out["last_date"]: raise ValueError("Первый лист позже последнего")
     if out["km_override"] is not None and not out["km_reason"]: raise ValueError("Укажите причину корректировки пробега")
+    out["input_mode"]=d.get("input_mode","waybills")
+    if out["input_mode"] not in ("waybills","monthly"):raise ValueError("Неизвестный режим ввода")
     out["fuel_reviewed"]=d.get("fuel_reviewed") is True
     out["fuel_review_reason"]=text(d.get("fuel_review_reason"))
     if out["fuel_reviewed"] and not out["fuel_review_reason"]:raise ValueError("Укажите основание сверки заправок")
@@ -132,6 +134,24 @@ def clean(c,month,vid,d):
           "organization":text(op.get("organization")),"document":doc,"confirmed":confirmed,"note":text(op.get("note"))})
     return out
 
+def assign_month_card(c,month,vid,v,card_id,reason,fuel_type):
+    """Explicit whole-month link; never steal historical operations or overlap periods."""
+    if type(card_id) is not int:raise ValueError("Выберите карту из справочника")
+    card=c.execute("SELECT * FROM cards WHERE id=?",(card_id,)).fetchone()
+    if not card:raise ValueError("Карта не найдена")
+    employee=v["employee_id"]
+    if not employee:raise ValueError("Для привязки карты за месяц сначала закрепите водителя за автомобилем")
+    start,end=month_bounds(month);a=start.isoformat()+"T00:00:00";b=end.isoformat()+"T00:00:00"
+    existing=c.execute("SELECT * FROM fuel_periods WHERE card_id=? AND start<? AND end>?",(card_id,b,a)).fetchall()
+    if existing:
+        if len(existing)==1 and existing[0]["start"]<=a and existing[0]["end"]>=b and existing[0]["vehicle_id"]==vid and existing[0]["employee_id"]==employee:return
+        raise ValueError("Есть исторические закрепления этой карты. Проверьте их в разделе ГСМ — История закреплений")
+    for row in fuel.report(c,month)["rows"]:
+        if row["card_id"]==card_id and ((row["vehicle_id"] is not None and row["vehicle_id"]!=vid) or (row["employee_id"] is not None and row["employee_id"]!=employee)):
+            raise ValueError("В выбранном месяце карта уже связана с другим автомобилем или сотрудником")
+    c.execute("INSERT INTO fuel_periods(card_id,start,end,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?,?)",(card_id,a,b,employee,vid,fuel_type))
+    c.execute("INSERT INTO fuel_corrections(at,kind,reason,before_json,after_json) VALUES(?,?,?,?,?)",(now(),"monthly_link",reason,"{}",json.dumps({"card_id":card_id,"vehicle_id":vid,"employee_id":employee,"month":month},ensure_ascii=False)))
+
 def save(c,d):
     month=d.get("month");month_bounds(month);vid=d.get("vehicle_id")
     if type(vid) is not int or not c.execute("SELECT 1 FROM vehicles WHERE id=?",(vid,)).fetchone(): raise ValueError("Автомобиль не найден")
@@ -144,6 +164,16 @@ def save(c,d):
         old,rev=stored(c,month,vid)
         if type(d.get("revision")) is not int or d["revision"]!=rev: raise ValueError("Карточка изменена, обновите страницу")
         v=c.execute("SELECT * FROM vehicles WHERE id=?",(vid,)).fetchone()
+        if d.get("monthly_card_id") is not None:
+            assign_month_card(c,month,vid,v,d["monthly_card_id"],reason,(old.get("identity") or {}).get("fuel_type",v["fuel_type"]))
+        if p["input_mode"]=="monthly":
+            for key,col in (("summer_norm","summer"),("winter_norm","winter")):
+                if p[key] is None:p[key]=old.get(key) if old.get(key) is not None else v[col]
+        if p["input_mode"]=="monthly" and not p["season"]:
+            import operations
+            suggestion=operations.suggestion(c,month,vid,p)
+            for key in ("season","summer_km","winter_km","summer_norm","winter_norm"):
+                if key in suggestion["fields"] and p.get(key) in (None,""):p[key]=suggestion["fields"][key]
         driver=c.execute("SELECT last_name,first_name,middle_name FROM employees WHERE id=?",(v["employee_id"],)).fetchone()
         p["identity"]=old.get("identity") or {"plate":v["plate"],"model":v["make"]+" "+v["model"],"fuel_type":v["fuel_type"],"driver":p.get("driver_label") or (" ".join(filter(None,driver)) if driver else "")}
         if p.get("start") is None:
@@ -177,7 +207,7 @@ def calculate(p,card,vehicle_fuel,prev,issues=()):
     if km is None: flags.append("Пробег не определён")
     if rawkm is not None and p.get("km_override") is not None and abs(rawkm-km)>0.005: flags.append("Использован скорректированный пробег вместо показаний одометра")
 
-    if not p.get("first_ref") or not p.get("last_ref"): flags.append("Не указаны первый/последний путевые листы")
+    if p.get("input_mode")!="monthly" and (not p.get("first_ref") or not p.get("last_ref")): flags.append("Не указаны первый/последний путевые листы")
     ins=outs=unconfirmed=0
     for op in p.get("manual",[]):
         if not vehicle_fuel or op["fuel_type"]!=vehicle_fuel: flags.append("Ручная операция: вид топлива не совпадает или не указан");continue
@@ -211,6 +241,14 @@ def report(c,month):
     by=defaultdict(list)
     for r in ops:
         if r["vehicle_id"]: by[r["vehicle_id"]].append(r)
+    card_rows=defaultdict(list)
+    for op in ops:card_rows[op["card_id"]].append(op)
+    cards=[]
+    for ccard in c.execute("SELECT id,number,employee_id,archived FROM cards ORDER BY number"):
+        group=card_rows[ccard["id"]]
+        if ccard["archived"] and not group:continue
+        liters={k:sum(x["quantity"] for x in group if x["category"]==k)/100 for k in ("Бензин","Дизель","Другое")}
+        cards.append({"id":ccard["id"],"number":ccard["number"],"employee_id":ccard["employee_id"],"liters":liters,"operations":len(group),"unassigned":sum(x["vehicle_id"] is None for x in group)})
     rows=[]
     for v in c.execute("SELECT * FROM vehicles ORDER BY plate").fetchall():
         p,rev=stored(c,month,v["id"]);prev=previous(c,month,v["id"])
@@ -230,10 +268,13 @@ def report(c,month):
             if p.get("capacity") and op["quantity"]/100>p["capacity"]: flags.append("Заправка по карте превышает вместимость")
         driver=c.execute("SELECT last_name,first_name,middle_name FROM employees WHERE id=?",(v["employee_id"],)).fetchone()
         if any(op["kind"]=="in" and any(t["category"]==op["fuel_type"] and t["moment"][:10]==op["date"] and t["quantity"]==round(op["liters"]*100) for t in by[v["id"]]) for op in p.get("manual",[])):flags.append("Возможный двойной учёт: ручная заправка совпадает с карточной по дате и объёму")
-        rows.append({"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":calculate(p,card/100,kind,prev,flags)})
+        card_groups=defaultdict(list)
+        for op in by[v["id"]]:card_groups[op["card_number"]].append(op)
+        assigned_cards=[{"number":n,"liters":sum(t["quantity"] for t in items if t["category"]==kind)/100,"operations":len(items)} for n,items in sorted(card_groups.items())]
+        rows.append({"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":calculate(p,card/100,kind,prev,flags)})
     sources=[{"id":r["id"],"name":r["name"],"rows":json.loads(r["rows_json"]),"at":r["at"]} for r in c.execute("SELECT * FROM writeoff_sources WHERE month=? ORDER BY id DESC",(month,))]
     audit=[dict(r) for r in c.execute("SELECT * FROM writeoff_audit WHERE month=? ORDER BY id DESC",(month,))]
-    return {"month":month,"rows":rows,"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit,"closed":False}
+    return {"month":month,"rows":rows,"cards":cards,"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit,"closed":False}
 
 def import_old(c,month,name,blob):
     month_bounds(month)

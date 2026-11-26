@@ -94,3 +94,39 @@ class AutomationTests(unittest.TestCase):
         book=load_workbook(BytesIO(automation.export_review(self.c,target)))
         self.assertIn("НЕ ГОТОВО",book["Проверка готовности"]["B1"].value)
         self.assertIn("черновик",book["Списание ГСМ"]["A6"].value);book.close()
+
+    def test_simple_monthly_entry_uses_card_and_no_waybill_registration(self):
+        month="2024-10"
+        rows=[["Карта № 0000000000000000001"],
+            ["Отгрузка","01.10.2024","12:00:00","АЗС","АИ-95",70,40,2800],
+            ["Возврат","02.10.2024","12:00:00","АЗС","АИ-95",70,-5,-350],
+            ["Отгрузка","01.11.2024","12:00:00","АЗС","АИ-95",70,20,1400]]
+        fuel.ingest(self.c,"test.xlsx",workbook(rows))
+        self.assertEqual(writeoff.report(self.c,month)["unassigned"],2)
+        operations.set_seasons(self.c,{"summer":"04-01","winter":"11-01"})
+        p={"input_mode":"monthly","start":20,"end":5,"odo_first":1000,"odo_last":1500,
+           "fuel_reviewed":True,"fuel_review_reason":"Сверено с выпиской"}
+        d={"month":month,"vehicle_id":1,"revision":0,"monthly_card_id":1,"reason":"Показания месяца","payload":p}
+        writeoff.save(self.c,d)
+        report=writeoff.report(self.c,month);r=report["rows"][0]
+        self.assertEqual(report["unassigned"],0)
+        self.assertEqual((r["result"]["card"],r["result"]["km"],r["result"]["actual"],r["result"]["norm"],r["result"]["difference"]),(35,500,50,50,0))
+        self.assertEqual(r["card_details"][0]["number"],"0000000000000000001")
+        self.assertEqual(writeoff.report(self.c,"2024-11")["unassigned"],1)
+        self.assertTrue(automation.readiness(self.c,month)["ready"])
+        writeoff.save(self.c,{**d,"revision":1})
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM fuel_periods").fetchone()[0],1)
+        change(self.c,"employees",{"last_name":"Другой","first_name":"Водитель"})
+        change(self.c,"vehicles",{"make":"Test","model":"Car","plate":"A124AA","fuel_type":"Бензин","summer":10,"winter":12,"employee_id":2})
+        with self.assertRaises(ValueError):writeoff.save(self.c,{**d,"vehicle_id":2})
+        self.assertEqual(writeoff.report(self.c,month)["rows"][0]["result"]["card"],35)
+        self.assertEqual(writeoff.stored(self.c,month,2)[1],0)
+
+    def test_simple_missing_ending_balance_does_not_invent_actual(self):
+        writeoff.save(self.c,{"month":"2024-10","vehicle_id":1,"revision":0,"reason":"Ввод","payload":{
+            "input_mode":"monthly","start":10,"odo_first":100,"odo_last":200,"season":"summer"}})
+        r=writeoff.report(self.c,"2024-10")["rows"][0]["result"]
+        self.assertEqual(r["km"],100)
+        self.assertEqual(r["norm"],10)
+        self.assertIsNone(r["actual"])
+        self.assertFalse(automation.readiness(self.c,"2024-10")["ready"])
