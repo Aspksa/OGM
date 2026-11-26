@@ -186,6 +186,7 @@ class Handler(BaseHTTPRequestHandler):
                     elif kind=="forecast": result=automation.forecast(c,month)
                     elif kind=="prices": result=automation.price_trend(c,month)
                     elif kind=="vehicle-analysis": result=automation.vehicle_analysis(c,month)
+                    elif kind=="vehicle-series": result=automation.vehicle_series(c,month,int(args.get("id",["0"])[0]))
                     elif kind=="inbox": result=INBOX_STATE
                     elif kind=="mileage":
                         vid=int(args.get("id",["0"])[0])
