@@ -270,3 +270,16 @@ def vehicle_analysis(c,month):
         forecast_row=predicted.get(r["id"],{})
         r["forecast"]=forecast_row.get("forecast");r["forecast_samples"]=len(forecast_row.get("samples",[]))
     return {"month":month,"rows":out,"unassigned":report["unassigned"],"method":"Стоимость — нетто покупок по картам нужного вида топлива, не бухгалтерская стоимость списания. Годовой расход — взвешенный по пробегу, только закрытые месяцы до выбранного периода включительно. Сигналы отклонений не изменяют данные."}
+
+def vehicle_series(c,month,vid):
+    """Twelve months ending at selected period; closed snapshots only."""
+    start,_=writeoff.month_bounds(month)
+    if start.year<2 or type(vid) is not int or vid<1:raise ValueError("Некорректный период или автомобиль")
+    months=list(reversed(list(history_months(month,11))))+[month]
+    rows=[]
+    for key in months:
+        snap=writeoff.closure(c,key)
+        x=next((r for r in snap[0]["rows"] if r["id"]==vid),None) if snap else None
+        z=x["result"] if x else {}
+        rows.append({"month":key,"actual":z.get("actual"),"norm":z.get("norm"),"km":z.get("km"),"fuel_type":x["fuel_type"] if x else None})
+    return {"month":month,"rows":rows}

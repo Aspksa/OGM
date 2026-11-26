@@ -300,3 +300,21 @@ class AutomationTests(unittest.TestCase):
         r=maintenance.inspect_inbox(db,cache)
         self.assertEqual(next(x["state"] for x in r["rows"] if x["name"]=="valid.xlsx"),"imported")
         self.assertEqual((root/"valid.xlsx").read_bytes(),blob)
+
+    def test_vehicle_series_uses_closed_snapshots_only(self):
+        result=automation.vehicle_series(self.c,"2024-11",1)
+        self.assertEqual(len(result["rows"]),12)
+        self.assertEqual(result["rows"][0]["month"],"2023-12")
+        self.assertEqual(result["rows"][-1]["month"],"2024-11")
+        self.assertTrue(all(x["actual"] is None for x in result["rows"]))
+        rows=[["Карта № 0000000000000000001"],
+              ["Отгрузка","01.11.2024","12:00:00","АЗС","АИ-95",70,40,2800]]
+        fuel.ingest(self.c,"series.xlsx",workbook(rows))
+        writeoff.save(self.c,{"month":"2024-11","vehicle_id":1,"revision":0,"monthly_card_id":1,"reason":"Показания","payload":{
+            "input_mode":"monthly","start":20,"end":10,"odo_first":1000,"odo_last":1500,
+            "season":"summer","capacity":60,"fuel_reviewed":True,"fuel_review_reason":"Выписка сверена"}})
+        self.assertIsNone(automation.vehicle_series(self.c,"2024-11",1)["rows"][-1]["actual"])
+        writeoff.month_action(self.c,"2024-11","close","Проверено")
+        last=automation.vehicle_series(self.c,"2024-11",1)["rows"][-1]
+        self.assertEqual((last["actual"],last["norm"],last["km"]),(50,50,500))
+        self.assertIsNone(automation.vehicle_series(self.c,"2024-10",1)["rows"][-1]["actual"])
