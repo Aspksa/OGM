@@ -57,6 +57,7 @@ def preview(c,name,blob):
         if abs(price*qty-amount*100)>100:amount_errors+=1
         sig=fuel.signature(row);counts[sig]+=1
         similar[(card,when,op)].add(sig)
+        similar[(card,when,op)].update(x[0] for x in c.execute("SELECT signature FROM fuel_operations WHERE card_number=? AND moment=? AND operation=?",(card,when,op)))
         card_id=cards.get(card)
         if card_id and c.execute("SELECT COUNT(*) FROM fuel_periods WHERE card_id=? AND start<=? AND end>?",(card_id,when,when)).fetchone()[0]>1:ambiguous+=1
         if c.execute("SELECT 1 FROM fuel_operations WHERE signature=? AND occurrence=?",(sig,counts[sig])).fetchone():duplicates+=1
@@ -236,10 +237,10 @@ def vehicle_analysis(c,month):
         km=sum(r["result"]["km"] for r in annual);used=sum(r["result"]["actual"] for r in annual)
         old_rate=rate(last) if last else None;cur_rate=rate(x)
         history=x.get("fuel_history")
-        matched=[r for r in history if r["category"]==kind] if history is not None else None
+        matched=[r for r in history if kind and r["category"]==kind] if history is not None else None
         # A zero purchase total is known only with reviewed absence of fuel.
         reviewed=p.get("fuel_reviewed") and "Операции изменились после сверки" not in z["flags"]
-        amount=sum(r["amount"] for r in matched)/100 if matched is not None and (matched or reviewed) else None
+        amount=sum(r["amount"] for r in matched)/100 if matched is not None and kind and (matched or reviewed) else None
         km_cost=writeoff.rounded(amount/z["km"]) if amount is not None and z["km"] is not None and z["km"]>0 else None
         issues=[{"code":"balance","message":msg,"basis":"Расчёт месячного баланса"} for msg in z["flags"]]
         def warn(code,message,basis):issues.append({"code":code,"message":message,"basis":basis})
@@ -257,7 +258,15 @@ def vehicle_analysis(c,month):
             if sheets:
                 for k,expected in (("odo_first",sheets[0]["odo_first"]),("odo_last",sheets[-1]["odo_last"])):
                     if p.get(k) is not None and expected is not None and abs(p[k]-expected)>.005:warn("document_difference","Показания месячной карточки и путевых листов различаются",f"{k}: карточка {p[k]}, путевой лист {expected}")
+        if not report.get("closed"):
+            for card in x.get("current_cards",[]):
+                if card["conflict"]:warn("card_conflict","Текущая карта водителя имеет другую историческую связь в этом месяце","Карта "+card["number"]+"; проверьте передачу карты, не изменяйте связь автоматически")
         for t in history or []:
             if t["flags"]:warn("operation",f"{t['moment']} · карта {t['card_number']}: "+ "; ".join(t["flags"]),"Операция из выписки")
         out.append({"id":vid,"plate":x["plate"],"model":x["model"],"fuel_type":kind,"purchase_amount":amount,"purchase_per_km":km_cost,"rate":cur_rate,"previous_month":previous,"previous_rate":old_rate,"rate_change":writeoff.rounded(cur_rate-old_rate) if cur_rate is not None and old_rate is not None else None,"annual_rate":writeoff.rounded(used/km*100) if km else None,"annual_months":len(annual),"issues":issues})
+    projection=forecast(c,month)
+    predicted={r["id"]:r for r in projection["rows"]}
+    for r in out:
+        forecast_row=predicted.get(r["id"],{})
+        r["forecast"]=forecast_row.get("forecast");r["forecast_samples"]=len(forecast_row.get("samples",[]))
     return {"month":month,"rows":out,"unassigned":report["unassigned"],"method":"Стоимость — нетто покупок по картам нужного вида топлива, не бухгалтерская стоимость списания. Годовой расход — взвешенный по пробегу, только закрытые месяцы до выбранного периода включительно. Сигналы отклонений не изменяют данные."}
