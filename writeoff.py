@@ -96,6 +96,39 @@ def previous(c,month,vid):
     p,_=stored(c,prev,vid)
     return p.get("end")
 
+def previous_odo(c,month,vid):
+    start,_=month_bounds(month);prev=(start-timedelta(days=1)).strftime("%Y-%m")
+    frozen=closure(c,prev)
+    p=next((r["payload"] for r in frozen[0]["rows"] if r["id"]==vid),{}) if frozen else stored(c,prev,vid)[0]
+    return p.get("odo_last")
+
+def save_batch(c,d):
+    month=d.get("month");month_bounds(month)
+    entries=d.get("entries")
+    if not isinstance(entries,list) or not 1<=len(entries)<=500:raise ValueError("От 1 до 500 автомобилей за сохранение")
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        ensure_open(c,month)
+        seen=set()
+        ledger=fuel.report(c,month)["rows"]
+        for entry in entries:
+            if not isinstance(entry,dict):raise ValueError("Некорректная строка")
+            vid=entry.get("vehicle_id")
+            if type(vid) is not int or vid in seen:raise ValueError("Повтор или неверный автомобиль")
+            seen.add(vid)
+            values=entry.get("values")
+            if not isinstance(values,dict) or not values or set(values)-{"start","end","odo_first","odo_last","season"}:raise ValueError("Некорректные поля")
+            old,rev=stored(c,month,vid)
+            if type(entry.get("revision")) is not int or entry["revision"]!=rev:raise ValueError("Карточка изменена. Обновите данные")
+            p={**old,**values,"input_mode":old.get("input_mode","monthly")}
+            if p.get("fuel_reviewed") and old.get("fuel_review_digest")!=review_digest(ledger,vid):
+                p["fuel_reviewed"]=False;p["fuel_review_reason"]=""
+            if "start" in values and values["start"] in ("",None) and old.get("start") is not None:raise ValueError("Введите начальный остаток вместо удаления сохранённого")
+            save(c,{"month":month,"vehicle_id":vid,"revision":rev,"reason":"Ввод месячных показаний в таблице","payload":p},manage_transaction=False)
+        c.commit()
+        return {"saved":len(seen)}
+    except BaseException:c.rollback();raise
+
 def clean(c,month,vid,d):
     start,end=month_bounds(month)
     if not isinstance(d,dict): raise ValueError("Некорректная карточка")
@@ -168,13 +201,13 @@ def confirm_month_card(c,d):
         c.commit()
     except BaseException:c.rollback();raise
 
-def save(c,d):
+def save(c,d,*,manage_transaction=True):
     month=d.get("month");month_bounds(month);vid=d.get("vehicle_id")
     if type(vid) is not int or not c.execute("SELECT 1 FROM vehicles WHERE id=?",(vid,)).fetchone(): raise ValueError("Автомобиль не найден")
     reason=text(d.get("reason"))
     if not reason: raise ValueError("Укажите причину сохранения/изменения")
     p=clean(c,month,vid,d.get("payload"))
-    c.execute("BEGIN IMMEDIATE")
+    if manage_transaction:c.execute("BEGIN IMMEDIATE")
     try:
         ensure_open(c,month)
         old,rev=stored(c,month,vid)
@@ -201,8 +234,10 @@ def save(c,d):
             c.execute("UPDATE writeoff_months SET payload=?,revision=? WHERE month=? AND vehicle_id=?",(raw,rev+1,month,vid))
         else: c.execute("INSERT INTO writeoff_months(month,vehicle_id,payload) VALUES(?,?,?)",(month,vid,raw))
         c.execute("INSERT INTO writeoff_audit(month,vehicle_id,at,reason,before_json,after_json) VALUES(?,?,?,?,?,?)",(month,vid,now(),reason,json.dumps(old,ensure_ascii=False) if rev else None,raw))
-        c.commit()
-    except BaseException: c.rollback();raise
+        if manage_transaction:c.commit()
+    except BaseException:
+        if manage_transaction:c.rollback()
+        raise
 
 def calculate(p,card,vehicle_fuel,prev,issues=()):
     flags=list(issues)
@@ -300,7 +335,11 @@ def report(c,month):
             result["actual"]=None;result["difference"]=None
             result["flags"]=[f for f in result["flags"] if not f.startswith("Отрицательный фактический расход") and f!="Нулевой пробег при положительном расходе"]
             result["flags"].append("Фактический расход ожидает подтверждения заправок")
-        rows.append({"current_cards":candidates,"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":result})
+        import operations
+        suggestion=operations.suggestion(c,month,v["id"],{**p,"season":""})["fields"]
+        auto_season=suggestion.get("season","")
+        if auto_season not in ("summer","winter"):auto_season=""
+        rows.append({"previous_odo":previous_odo(c,month,v["id"]),"auto_season":auto_season,"current_cards":candidates,"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":result})
     sources=[{"id":r["id"],"name":r["name"],"rows":json.loads(r["rows_json"]),"at":r["at"]} for r in c.execute("SELECT * FROM writeoff_sources WHERE month=? ORDER BY id DESC",(month,))]
     audit=[dict(r) for r in c.execute("SELECT * FROM writeoff_audit WHERE month=? ORDER BY id DESC",(month,))]
     return {"month":month,"rows":rows,"cards":cards,"fuel_months":ledger["months"],"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit,"closed":False}

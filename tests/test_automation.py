@@ -197,3 +197,26 @@ class AutomationTests(unittest.TestCase):
         nextyear=automation.month_workspace(self.c,"2025-01")
         self.assertEqual(nextyear["months"][0]["month"],"2025-01")
         self.assertFalse(any(m["statement_loaded"] for m in nextyear["months"]))
+
+    def test_inline_batch_atomic_and_carry_forward(self):
+        writeoff.save(self.c,{"month":"2024-10","vehicle_id":1,"revision":0,"reason":"Октябрь","payload":{
+            "input_mode":"monthly","start":20,"end":15,"odo_first":1000,"odo_last":1500,"season":"summer",
+            "fuel_reviewed":True,"fuel_review_reason":"Нет заправок"}})
+        r=writeoff.report(self.c,"2024-11")["rows"][0]
+        self.assertEqual(r["previous"],15)
+        self.assertEqual(r["previous_odo"],1500)
+        entry={"vehicle_id":1,"revision":0,"values":{"start":"15","odo_first":"1500","odo_last":"1600","end":"5","season":"summer"}}
+        with self.assertRaises(ValueError):
+            writeoff.save_batch(self.c,{"month":"2024-11","entries":[entry,{"vehicle_id":999,"revision":0,"values":{"start":"1"}}]})
+        self.assertEqual(writeoff.stored(self.c,"2024-11",1)[1],0)
+        self.assertEqual(writeoff.save_batch(self.c,{"month":"2024-11","entries":[entry]})["saved"],1)
+        r=writeoff.report(self.c,"2024-11")["rows"][0]
+        self.assertEqual(r["result"]["km"],100)
+        self.assertEqual(r["result"]["norm"],10)
+        self.assertIsNone(r["result"]["actual"])
+        with self.assertRaises(ValueError):
+            writeoff.save_batch(self.c,{"month":"2024-11","entries":[entry]})
+        self.assertEqual(writeoff.stored(self.c,"2024-11",1)[1],1)
+        with self.assertRaises(ValueError):
+            writeoff.save_batch(self.c,{"month":"2024-11","entries":[{"vehicle_id":1,"revision":1,"values":{"card":999}}]})
+        self.assertEqual(writeoff.stored(self.c,"2024-11",1)[0]["end"],5)
