@@ -243,3 +243,60 @@ class AutomationTests(unittest.TestCase):
         self.assertTrue(closed["closed"])
         self.assertEqual(closed["rows"][0]["fuel_history"],r["fuel_history"])
         self.assertEqual(closed["rows"][0]["payload"]["capacity"],60)
+
+    def test_flat_card_statement_and_explicit_control_total(self):
+        header=["Номер карты","Операция","Дата","Время","АЗС","Топливо","Цена","Литры","Сумма"]
+        card="0000000000000000001"
+        rows=[header,[card,"Отгрузка","01.11.2024","12:00:00","АЗС","АИ-95",70,40,2800],
+              [card,"Возврат","02.11.2024","12:00:00","АЗС","АИ-95",70,-5,-350],
+              ["","Итого по выписке нетто","","","","","",35,2450]]
+        for name in ("flat.xls","flat.xlsx"):
+            blob=workbook(rows,name.endswith(".xls"))
+            p=automation.preview(self.c,name,blob)
+            self.assertTrue(p["control_complete"])
+            self.assertEqual(p["months"][0]["liters"],35)
+            self.assertEqual(p["amount_errors"],0)
+            self.assertEqual(p["cards"][0]["number"],card)
+        rows[-1][-1]=2451
+        with self.assertRaises(ValueError):automation.preview(self.c,"bad.xlsx",workbook(rows))
+        with self.assertRaises(ValueError):fuel.ingest(self.c,"bad.xlsx",workbook(rows))
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM fuel_operations").fetchone()[0],0)
+        rows[1][0]=12345
+        with self.assertRaises(ValueError):automation.preview(self.c,"numeric.xlsx",workbook(rows))
+
+    def test_vehicle_analysis_purchase_cost_and_missing_history(self):
+        rows=[["Карта № 0000000000000000001"],
+              ["Отгрузка","01.11.2024","12:00:00","АЗС","АИ-95",70,40,2800],
+              ["Возврат","02.11.2024","12:00:00","АЗС","АИ-95",70,-5,-350]]
+        fuel.ingest(self.c,"purchases.xlsx",workbook(rows))
+        x=automation.vehicle_analysis(self.c,"2024-11")["rows"][0]
+        self.assertIsNone(x["purchase_amount"])
+        writeoff.save(self.c,{"month":"2024-11","vehicle_id":1,"revision":0,"monthly_card_id":1,"reason":"Показания","payload":{
+            "input_mode":"monthly","start":20,"end":5,"odo_first":1000,"odo_last":1500,
+            "season":"summer","capacity":60,"fuel_reviewed":True,"fuel_review_reason":"Выписка сверена"}})
+        x=automation.vehicle_analysis(self.c,"2024-11")["rows"][0]
+        self.assertEqual(x["purchase_amount"],2450)
+        self.assertEqual(x["purchase_per_km"],4.9)
+        self.assertEqual(x["rate"],10)
+        self.assertIsNone(x["annual_rate"])
+        writeoff.month_action(self.c,"2024-11","close","Проверено")
+        x=automation.vehicle_analysis(self.c,"2024-11")["rows"][0]
+        self.assertEqual(x["annual_rate"],10)
+        self.assertEqual(x["annual_months"],1)
+
+    def test_incoming_scan_is_read_only(self):
+        import maintenance
+        db=Path(self.tmp.name)/"test.sqlite"
+        root=db.parent/"incoming";root.mkdir()
+        blob=workbook([["Карта № 0000000000000000001"],["Отгрузка","01.11.2024","12:00:00","АЗС","АИ-95",70,40,2800]])
+        (root/"valid.xlsx").write_bytes(blob)
+        (root/"bad.xlsx").write_bytes(b"not excel")
+        cache={}
+        r=maintenance.inspect_inbox(db,cache)
+        self.assertTrue(r["integrity_ok"])
+        self.assertEqual({x["name"]:x["state"] for x in r["rows"]},{"valid.xlsx":"ready","bad.xlsx":"review"})
+        self.assertEqual(self.c.execute("SELECT COUNT(*) FROM fuel_operations").fetchone()[0],0)
+        fuel.ingest(self.c,"valid.xlsx",blob)
+        r=maintenance.inspect_inbox(db,cache)
+        self.assertEqual(next(x["state"] for x in r["rows"] if x["name"]=="valid.xlsx"),"imported")
+        self.assertEqual((root/"valid.xlsx").read_bytes(),blob)

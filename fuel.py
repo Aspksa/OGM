@@ -12,6 +12,7 @@ SCHEMA="""
 CREATE TABLE IF NOT EXISTS fuel_imports(id INTEGER PRIMARY KEY, filename TEXT NOT NULL, digest TEXT UNIQUE NOT NULL, imported_at TEXT NOT NULL, source BLOB NOT NULL, inserted INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS fuel_operations(id INTEGER PRIMARY KEY, import_id INTEGER REFERENCES fuel_imports(id), card_id INTEGER REFERENCES cards(id), card_number TEXT NOT NULL, moment TEXT NOT NULL, operation TEXT NOT NULL, station TEXT NOT NULL, product TEXT NOT NULL, category TEXT NOT NULL, price INTEGER NOT NULL, quantity INTEGER NOT NULL, amount INTEGER NOT NULL, signature TEXT NOT NULL, occurrence INTEGER NOT NULL, UNIQUE(signature,occurrence));
 CREATE INDEX IF NOT EXISTS fuel_ops_moment ON fuel_operations(moment);
+CREATE INDEX IF NOT EXISTS fuel_ops_card_event ON fuel_operations(card_number,moment,operation);
 CREATE INDEX IF NOT EXISTS fuel_ops_month ON fuel_operations(substr(moment,1,7));
 CREATE TABLE IF NOT EXISTS fuel_links(id INTEGER PRIMARY KEY, card_id INTEGER REFERENCES cards(id), at TEXT NOT NULL, employee_id INTEGER REFERENCES employees(id), vehicle_id INTEGER REFERENCES vehicles(id), fuel_type TEXT NOT NULL, UNIQUE(card_id,at));
 CREATE TABLE IF NOT EXISTS fuel_periods(id INTEGER PRIMARY KEY, card_id INTEGER REFERENCES cards(id), start TEXT NOT NULL, end TEXT NOT NULL, employee_id INTEGER REFERENCES employees(id), vehicle_id INTEGER REFERENCES vehicles(id), fuel_type TEXT NOT NULL, CHECK(start<end));
@@ -50,7 +51,9 @@ def signature(row):
     return sha256(json.dumps(legacy,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
 
 def link_at(c,card_id,when):
-    link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_periods WHERE card_id=? AND start<=? AND end>?",(card_id,when,when)).fetchone()
+    links=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_periods WHERE card_id=? AND start<=? AND end>? LIMIT 2",(card_id,when,when)).fetchall()
+    if len(links)>1:return (None,None,"")
+    link=links[0] if links else None
     if link is None:
         link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_links WHERE card_id=? AND at<=? ORDER BY at DESC LIMIT 1",(card_id,when)).fetchone()
     return tuple(link) if link else (None,None,"")
@@ -69,8 +72,8 @@ def stamp(day,clock):
     if not isinstance(clock,time): clock=time.fromisoformat(str(clock).strip())
     return datetime.combine(day,clock).isoformat(timespec="seconds")
 
-def parse_rows(rows):
-    card=None; result=[]; order=list(range(8))
+def parse_rows(rows,controls=None):
+    card=None; result=[]; order=list(range(8));card_col=None;declared=None
     aliases=(
         {"операция","тип операции","вид операции"},
         {"дата","дата операции"},
@@ -84,15 +87,26 @@ def parse_rows(rows):
         values=list(raw)
         label=str(values[0] or "").strip() if values else ""
         m=re.match(r"^Карта\s*№\s*(\d+)(?:\s|$)",label,re.I)
-        if m: card=m.group(1); continue
+        if m: card=m.group(1);card_col=None;continue
         if re.match(r"^Карта\s*№",label,re.I): raise ValueError(f"Строка {i}: неверный номер карты")
         normalized=[" ".join(str(x or "").strip().casefold().split()) for x in values]
         if any(x in aliases[0] for x in normalized):
             matches=[[j for j,v in enumerate(normalized) if v in names] for names in aliases]
             if any(len(x)!=1 for x in matches):raise ValueError(f"Строка {i}: неполные или неоднозначные заголовки")
-            order=[x[0] for x in matches];continue
+            order=[x[0] for x in matches]
+            card_matches=[j for j,v in enumerate(normalized) if v in {"карта","номер карты","№ карты","топливная карта","номер топливной карты"}]
+            if len(card_matches)>1:raise ValueError(f"Строка {i}: неоднозначный столбец карты")
+            card_col=card_matches[0] if card_matches else None
+            continue
         r=[values[j] if j<len(values) else None for j in order]
         op=str(r[0] or "").strip().casefold()
+        # Only explicit net grand totals are machine-comparable; generic subtotals
+        # can be per card/product and must never be guessed.
+        if op in ("итого по выписке нетто","итого нетто по выписке"):
+            if declared is not None:raise ValueError(f"Строка {i}: повтор контрольного итога")
+            try:declared=(cents(r[6]),cents(r[7]))
+            except Exception as e:raise ValueError(f"Строка {i}: неверный контрольный итог") from e
+            continue
         if op not in ("отгрузка","возврат"):
             if op and any(r[j] not in (None,"") for j in (1,2)) and any(r[j] not in (None,"") for j in (5,6,7)):
                 # Reject transaction-like rows, but leave explicit statement subtotals separate.
@@ -100,12 +114,21 @@ def parse_rows(rows):
                     raise ValueError(f"Строка {i}: неизвестная операция {op[:80]}")
             continue
         try:
+            if card_col is not None:
+                val=values[card_col] if card_col<len(values) else None
+                if not isinstance(val,str) or not re.fullmatch(r"\d+",val.strip()):
+                    raise ValueError("Номер карты в столбце должен быть текстом (с сохранением ведущих нулей)")
+                card=val.strip()
             if not card: raise ValueError("Нет номера карты")
             when=stamp(r[1],r[2]); station=str(r[3] or "").strip(); product=str(r[4] or "").strip()
             price,qty,amount=map(cents,r[5:8])
             if not station or not product or price<0 or (op=="возврат" and (qty>0 or amount>0)) or (op=="отгрузка" and (qty<0 or amount<0)): raise ValueError("Некорректная операция")
             result.append((card,when,op,station,product,category(product),price,qty,amount))
         except Exception as e: raise ValueError(f"Строка {i}: {e}") from e
+    if declared is not None:
+        computed=(sum(r[7] for r in result),sum(r[8] for r in result))
+        if declared!=computed:raise ValueError("Контрольный итог нетто не совпадает с операциями листа")
+    if controls is not None:controls.append({"checked":declared is not None,"operations":len(result),"liters":sum(r[7] for r in result)/100,"amount":sum(r[8] for r in result)/100})
     return result
 
 def open_legacy_xls(xlrd,blob):
@@ -120,7 +143,7 @@ def open_legacy_xls(xlrd,blob):
         return xlrd.open_workbook(file_contents=blob,on_demand=True,encoding_override="cp1251",logfile=StringIO())
     return book
 
-def parse_file(name,blob):
+def parse_file(name,blob,controls=None):
     result=[]
     if name.lower().endswith(".xls"):
         import xlrd
@@ -137,7 +160,7 @@ def parse_file(name,blob):
                                 d=xlrd.xldate.xldate_as_datetime(v,book.datemode); v=d.time() if 0<=v<1 else d
                             values.append(v)
                         yield values
-                result.extend(parse_rows(rows()))
+                result.extend(parse_rows(rows(),controls))
         finally: book.release_resources()
     elif name.lower().endswith(".xlsx"):
         from openpyxl import load_workbook
@@ -147,7 +170,7 @@ def parse_file(name,blob):
         try:
             for sheet in book.worksheets:
                 if (sheet.max_row or 0)>100000 or (sheet.max_column or 0)>256: raise ValueError("Слишком большая таблица")
-                result.extend(parse_rows(sheet.iter_rows(max_col=max(8,sheet.max_column or 8),values_only=True)))
+                result.extend(parse_rows(sheet.iter_rows(max_col=max(8,sheet.max_column or 8),values_only=True),controls))
         finally: book.close()
     else: raise ValueError("Поддерживаются только XLS и XLSX")
     return result

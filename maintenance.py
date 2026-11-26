@@ -34,6 +34,42 @@ def validate(c):
     tables={r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if not {"employees","vehicles","cards","fuel_operations","writeoff_months"}<=tables:raise ValueError("Not an OGM database")
 
+def inspect_inbox(db,cache=None):
+    """Local preview only. Do not move, delete, import or modify supplier documents."""
+    import automation
+    import fuel
+    from hashlib import sha256
+    root=Path(db).parent/"incoming"
+    if root.is_symlink():raise ValueError("Папка входящих не должна быть ссылкой")
+    root.mkdir(exist_ok=True)
+    paths=sorted((p for p in root.iterdir() if p.suffix.lower() in (".xls",".xlsx") and not p.is_symlink() and p.is_file() and not p.name.startswith("~$")),key=lambda p:p.name.casefold())
+    rows=[];cache=cache if cache is not None else {};fresh={}
+    with closing(sqlite3.connect(Path(db).resolve().as_uri()+"?mode=ro",uri=True,timeout=5)) as c:
+        c.row_factory=sqlite3.Row
+        for p in paths[:50]:
+            try:
+                before=p.stat()
+                if not 0<before.st_size<=fuel.MAX_FILE:raise ValueError("Неверный размер файла")
+                key=(p.name,before.st_size,before.st_mtime_ns)
+                if key in cache:meta=cache[key]
+                else:
+                    with p.open("rb") as stream:blob=stream.read(fuel.MAX_FILE+1)
+                    after=p.stat()
+                    if len(blob)!=before.st_size or after.st_mtime_ns!=before.st_mtime_ns:raise ValueError("Файл ещё записывается")
+                    automation.file_kind(p.name,blob)
+                    controls=[];ops=fuel.parse_file(p.name,blob,controls)
+                    if not ops:raise ValueError("Не распознана выписка ГСМ")
+                    meta={"digest":sha256(blob).hexdigest(),"months":sorted({r[1][:7] for r in ops}),"operations":len(ops)}
+                fresh[key]=meta
+                active=c.execute("SELECT 1 FROM fuel_imports WHERE digest=? AND cancelled_at IS NULL",(meta["digest"],)).fetchone()
+                rows.append({"name":p.name,**meta,"state":"imported" if active else "ready"})
+            except Exception as e:
+                rows.append({"name":p.name,"state":"review","message":str(e)[:300]})
+        integrity=[r[0] for r in c.execute("PRAGMA quick_check")]
+        broken=c.execute("PRAGMA foreign_key_check").fetchone()
+    cache.clear();cache.update(fresh)
+    return {"folder":str(root),"scanned_at":datetime.now().isoformat(timespec="seconds"),"rows":rows,"omitted":max(0,len(paths)-50),"integrity_ok":integrity==["ok"] and broken is None}
+
 def backup(db, label="manual", destination=None):
     db=Path(db)
     if not db.is_file():raise ValueError("Database does not exist")
