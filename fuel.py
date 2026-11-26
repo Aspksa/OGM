@@ -12,6 +12,7 @@ SCHEMA="""
 CREATE TABLE IF NOT EXISTS fuel_imports(id INTEGER PRIMARY KEY, filename TEXT NOT NULL, digest TEXT UNIQUE NOT NULL, imported_at TEXT NOT NULL, source BLOB NOT NULL, inserted INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS fuel_operations(id INTEGER PRIMARY KEY, import_id INTEGER REFERENCES fuel_imports(id), card_id INTEGER REFERENCES cards(id), card_number TEXT NOT NULL, moment TEXT NOT NULL, operation TEXT NOT NULL, station TEXT NOT NULL, product TEXT NOT NULL, category TEXT NOT NULL, price INTEGER NOT NULL, quantity INTEGER NOT NULL, amount INTEGER NOT NULL, signature TEXT NOT NULL, occurrence INTEGER NOT NULL, UNIQUE(signature,occurrence));
 CREATE INDEX IF NOT EXISTS fuel_ops_moment ON fuel_operations(moment);
+CREATE INDEX IF NOT EXISTS fuel_ops_card_event ON fuel_operations(card_number,moment,operation);
 CREATE INDEX IF NOT EXISTS fuel_ops_month ON fuel_operations(substr(moment,1,7));
 CREATE TABLE IF NOT EXISTS fuel_links(id INTEGER PRIMARY KEY, card_id INTEGER REFERENCES cards(id), at TEXT NOT NULL, employee_id INTEGER REFERENCES employees(id), vehicle_id INTEGER REFERENCES vehicles(id), fuel_type TEXT NOT NULL, UNIQUE(card_id,at));
 CREATE TABLE IF NOT EXISTS fuel_periods(id INTEGER PRIMARY KEY, card_id INTEGER REFERENCES cards(id), start TEXT NOT NULL, end TEXT NOT NULL, employee_id INTEGER REFERENCES employees(id), vehicle_id INTEGER REFERENCES vehicles(id), fuel_type TEXT NOT NULL, CHECK(start<end));
