@@ -180,6 +180,7 @@ class Handler(BaseHTTPRequestHandler):
                     kind=parts.path.split("/")[-1]
                     month=args.get("month",[""])[0]
                     if kind=="readiness": result=automation.readiness(c,month)
+                    elif kind=="workspace": result=automation.month_workspace(c,month)
                     elif kind=="forecast": result=automation.forecast(c,month)
                     elif kind=="prices": result=automation.price_trend(c,month)
                     elif kind=="mileage":
