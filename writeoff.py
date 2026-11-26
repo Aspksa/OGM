@@ -339,7 +339,8 @@ def report(c,month):
         suggestion=operations.suggestion(c,month,v["id"],{**p,"season":""})["fields"]
         auto_season=suggestion.get("season","")
         if auto_season not in ("summer","winter"):auto_season=""
-        rows.append({"previous_odo":previous_odo(c,month,v["id"]),"auto_season":auto_season,"current_cards":candidates,"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":result})
+        history=[{k:t[k] for k in ("id","card_number","moment","operation","station","product","category","price","quantity","amount","flags")} for t in by[v["id"]]]
+        rows.append({"fuel_history":history,"previous_odo":previous_odo(c,month,v["id"]),"auto_season":auto_season,"current_cards":candidates,"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":result})
     sources=[{"id":r["id"],"name":r["name"],"rows":json.loads(r["rows_json"]),"at":r["at"]} for r in c.execute("SELECT * FROM writeoff_sources WHERE month=? ORDER BY id DESC",(month,))]
     audit=[dict(r) for r in c.execute("SELECT * FROM writeoff_audit WHERE month=? ORDER BY id DESC",(month,))]
     return {"month":month,"rows":rows,"cards":cards,"fuel_months":ledger["months"],"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit,"closed":False}
