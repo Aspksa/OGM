@@ -16,3 +16,70 @@ body{grid-template-columns:224px minmax(0,1fr)}aside{position:sticky;top:0;heigh
 .monthly-summary{display:grid;gap:5px;background:#223143;border:1px solid #425870;border-radius:7px;padding:14px 16px;margin:12px 0}.monthly-summary strong{font-size:20px;color:#dcecff}.monthly-advanced{margin:12px 0;padding:10px 12px;border:1px solid #394452;border-radius:6px}.monthly-advanced summary{cursor:pointer;color:#a9c6e7;font-weight:600}.monthly-advanced[open] summary{margin-bottom:10px}.writeoff-panel td details{min-width:120px;font-size:12px}.writeoff-panel td details p{max-width:300px;margin:5px 0}.writeoff-dialog form>label{margin:10px 0}
 
 .card-pending{display:grid;gap:5px;min-width:200px;padding:7px 0}.card-pending strong{font-variant-numeric:tabular-nums}.card-pending button{white-space:normal;font-size:12px}.monthly-summary select{max-width:320px}
+
+/* Monthly fuel workspace: statement presence and report readiness are distinct. */
+.writeoff-panel{--wo-green:#70c79f;--wo-red:#ec9096;--wo-amber:#e1b86d;--wo-blue:#8bb8ed;min-width:0}
+.wo-calendar{background:#151b23;border:1px solid #303b49;border-radius:8px;padding:15px 16px 12px;margin-bottom:16px}
+.wo-calendar-head,.wo-overview,.wo-table-head{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+.wo-calendar-head h2,.wo-table-head h2{font-size:17px;letter-spacing:-.15px}
+.wo-calendar-head p,.wo-overview p{margin:3px 0 0;font-size:12px}
+.wo-year-nav{display:flex;align-items:center;gap:10px;font-variant-numeric:tabular-nums}
+.wo-year-nav button{padding:3px 12px;font-size:19px;line-height:1.3;background:#1c2632}
+.wo-year-nav button:disabled{opacity:.35;cursor:default}
+.wo-month-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:13px 0 10px}
+button.wo-month{display:flex;flex-direction:column;align-items:stretch;gap:3px;min-width:0;text-align:left;padding:10px 11px;border-radius:6px;border:1px solid #394452;background:#1b232e;line-height:1.35}
+button.wo-month.wo-loaded{background:#172c27;border-color:#355e4e}
+button.wo-month.wo-missing{background:#2b2028;border-color:#67424a}
+button.wo-month.wo-loaded:hover{background:#203a31}
+button.wo-month.wo-missing:hover{background:#382832}
+button.wo-month[aria-pressed=true]{outline:2px solid var(--wo-blue);outline-offset:1px;border-color:var(--wo-blue)}
+.wo-month-top{display:flex;justify-content:space-between;align-items:center;gap:4px;font-weight:600;color:#e4eaf2;font-size:13px}
+.wo-dot{width:8px;height:8px;flex:none;border-radius:50%;background:var(--wo-red)}
+.wo-loaded .wo-dot{background:var(--wo-green)}
+.wo-month>strong{font-size:12px;color:var(--wo-red);font-weight:600}
+.wo-loaded>strong{color:var(--wo-green)}
+.wo-month small{font-size:11px;color:#adb9c8;white-space:normal}
+.wo-month-state{padding-top:4px;border-top:1px solid #ffffff13}
+.wo-good,.wo-month .wo-good{color:var(--wo-green)}
+.wo-bad,.wo-month .wo-bad{color:var(--wo-red)}
+.wo-warn,.wo-month .wo-warn{color:var(--wo-amber)}
+.wo-selected{color:var(--wo-blue)}
+.wo-legend{display:flex;gap:8px 18px;flex-wrap:wrap;font-size:11px}
+.wo-legend span{display:flex;align-items:center;gap:6px}
+.wo-legend i{display:inline-block;width:7px;height:7px;background:currentColor;border-radius:50%}
+.wo-legend .wo-selected i{background:none;width:9px;height:9px;border:1.5px solid currentColor;border-radius:2px}
+.wo-toolbar{gap:7px;align-items:flex-start}
+.wo-toolbar input[type=month]{flex:0 1 155px;min-width:145px}
+.wo-toolbar input[type=search]{flex:1 1 180px;max-width:320px}
+.wo-toolbar input[hidden]{display:none!important}
+.writeoff-panel .wo-export-menu{padding:0;border:0;position:relative;max-width:100%}
+.wo-export-menu summary{cursor:pointer;padding:8px 10px;border:1px solid #394452;border-radius:5px;background:#1d2530}
+.wo-export-menu[open]{display:grid;gap:6px;min-width:210px}
+.wo-export-menu input,.wo-export-menu button{width:100%;max-width:100%;min-width:0}
+.wo-lock:not(:disabled){border-color:#5277a0}.wo-lock:disabled{opacity:.45;cursor:default}
+.wo-overview{padding:14px 0 12px;border-bottom:1px solid #303b49}
+.wo-overview-title h2{font-size:22px;letter-spacing:-.4px}
+.wo-status-stack{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.wo-status-stack span{font-size:12px;padding:5px 9px;border:1px solid currentColor;border-radius:4px;background:#171e28}
+.wo-problems{display:flex;flex-wrap:wrap;gap:8px 18px;padding:10px 0 4px;font-size:12px}
+.wo-problems span:before{content:"• ";font-weight:700}
+.wo-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0 8px}
+.wo-metrics .metric{background:#171e28;border-color:#2c3745;padding:11px 13px;min-width:0}
+.wo-metrics .metric span{font-size:12px}.wo-metrics .metric strong{font-size:24px;line-height:1.35;font-variant-numeric:tabular-nums}
+.wo-table-head{margin:19px 0 4px}
+.wo-ledger table{min-width:1180px;font-size:12px}
+.wo-ledger td,.wo-ledger th{padding:9px 10px;vertical-align:top}
+.wo-ledger td:nth-child(2){min-width:155px}
+.wo-ledger td:nth-child(3){min-width:180px}
+.wo-ledger td:nth-child(n+4):nth-child(-n+13){text-align:right;white-space:nowrap}
+.wo-ledger th:nth-child(n+4):nth-child(-n+13){text-align:right}
+.wo-card-line{display:grid;gap:3px;padding:3px 0 5px}
+.wo-card-number{white-space:nowrap;overflow-wrap:normal;font-size:12px;font-variant-numeric:tabular-nums}
+.wo-card-line strong{font-weight:600}.wo-card-line small{font-size:11px}
+.wo-row-actions{display:grid;gap:5px;min-width:112px}
+.wo-row-actions>span{font-weight:600;font-size:11px}
+.writeoff-panel .wo-row-actions details{padding:4px 0;border:0}
+.wo-row-actions details p{white-space:normal}
+@media(min-width:1600px){.wo-month-grid{grid-template-columns:repeat(12,minmax(0,1fr))}.wo-metrics{grid-template-columns:repeat(6,minmax(0,1fr))}}
+@media(max-width:1050px){.wo-month-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:650px){.wo-calendar{padding:12px}.wo-month-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.wo-month-grid button{padding:8px}.wo-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.wo-overview-title h2{font-size:20px}.wo-metrics .metric strong{font-size:22px}.wo-toolbar input[type=search]{max-width:none}.wo-status-stack{gap:5px}}

@@ -76,8 +76,8 @@ def mileage_proposal(c,month,vid,p):
     return {"km":candidate,"message":("Есть разрывы показаний. Сумма пробегов только по представленным листам; проверьте полноту." if gap else "Сумма пробегов по представленным листам; подтвердите полноту и достоверность."),
         "evidence":evidence,"reason":"Сумма пробегов по путевым листам: "+", ".join(s["number"]+" ("+s["day"]+")" for s in evidence)[:380]}
 
-def readiness(c,month):
-    writeoff.month_bounds(month);r=writeoff.report(c,month);rows=[]
+def readiness(c,month,report=None):
+    writeoff.month_bounds(month);r=report if report is not None else writeoff.report(c,month);rows=[]
     for x in r["rows"]:
         z=x["result"];p=x["payload"]
         blocked=[];warnings=[]
@@ -108,6 +108,29 @@ def readiness(c,month):
     return {"month":month,"closed":r.get("closed",False),"unassigned":r["unassigned"],"rows":rows,
         "ready":bool(rows) and not r["unassigned"] and all(not x["blocked"] for x in rows),
         "review":sum(bool(x["warnings"]) for x in rows),"blocked":sum(bool(x["blocked"]) for x in rows)}
+
+def month_workspace(c,month):
+    """Separate statement presence from readiness, with selected month in one read snapshot."""
+    start,_=writeoff.month_bounds(month)
+    year=start.year
+    report=writeoff.report(c,month)
+    check=readiness(c,month,report)
+    counts={r["month"]:r["n"] for r in c.execute("SELECT substr(moment,1,7) AS month,COUNT(*) AS n FROM fuel_operations WHERE substr(moment,1,4)=? GROUP BY 1",(str(year).zfill(4),))}
+    closed={r[0] for r in c.execute("SELECT month FROM writeoff_closures WHERE substr(month,1,4)=?",(str(year).zfill(4),))}
+    saved={r[0] for r in c.execute("SELECT DISTINCT month FROM writeoff_months WHERE substr(month,1,4)=?",(str(year).zfill(4),))}
+    months=[]
+    for i in range(1,13):
+        key=f"{year:04d}-{i:02d}"
+        n=counts.get(key,0)
+        if key==month:state=check
+        elif n or key in saved or key in closed:state=readiness(c,key)
+        else:state=None
+        months.append({"month":key,"statement_loaded":n>0,"operations":n,
+            "unassigned":state["unassigned"] if state else 0,
+            "blocked":state["blocked"] if state else None,"review":state["review"] if state else None,
+            "closed":key in closed,"ready":bool(state and state["ready"]),
+            "draft":key in saved})
+    return {"report":report,"readiness":check,"months":months}
 
 def history_months(month,count):
     start,_=writeoff.month_bounds(month)
