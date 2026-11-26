@@ -19,6 +19,8 @@ from logging.handlers import RotatingFileHandler
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "data" / "ogm.sqlite3"
+INBOX_STATE = {"rows":[],"scanned_at":None,"integrity_ok":None,"folder":str(DB.parent/"incoming")}
+INBOX_CACHE = {}
 KINDS = {
     "employees": ("last_name", "first_name", "middle_name", "department"),
     "vehicles": ("make", "model", "plate", "employee_id", "summer", "winter", "insurance_start", "insurance_end", "fuel_type", "status"),
@@ -183,6 +185,8 @@ class Handler(BaseHTTPRequestHandler):
                     elif kind=="workspace": result=automation.month_workspace(c,month)
                     elif kind=="forecast": result=automation.forecast(c,month)
                     elif kind=="prices": result=automation.price_trend(c,month)
+                    elif kind=="vehicle-analysis": result=automation.vehicle_analysis(c,month)
+                    elif kind=="inbox": result=INBOX_STATE
                     elif kind=="mileage":
                         vid=int(args.get("id",["0"])[0])
                         writeoff.month_bounds(month)
@@ -384,6 +388,15 @@ def run_server():
                 except (ValueError,sqlite3.Error,OSError) as e: logging.warning("Backup failure: %s",type(e).__name__);print("Backup warning:",e,flush=True)
         worker=threading.Thread(target=backup_loop,daemon=True)
         worker.start()
+        def inbox_loop():
+            global INBOX_STATE
+            while not stop.is_set():
+                try:INBOX_STATE=maintenance.inspect_inbox(DB,INBOX_CACHE)
+                except (OSError,ValueError,sqlite3.Error) as e:
+                    INBOX_STATE={"rows":[],"scanned_at":None,"integrity_ok":None,"folder":str(DB.parent/"incoming"),"error":str(e)}
+                if stop.wait(60):break
+        scanner=threading.Thread(target=inbox_loop,daemon=True)
+        scanner.start()
         url = f"http://127.0.0.1:{server.server_port}"
         print("OGM:", url, flush=True)
         threading.Timer(0.3, webbrowser.open, args=(url,)).start()
@@ -394,6 +407,7 @@ def run_server():
         finally:
             stop.set()
             worker.join()
+            scanner.join()
 
 if __name__ == "__main__":
     main()
