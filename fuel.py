@@ -50,7 +50,9 @@ def signature(row):
     return sha256(json.dumps(legacy,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
 
 def link_at(c,card_id,when):
-    link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_periods WHERE card_id=? AND start<=? AND end>?",(card_id,when,when)).fetchone()
+    links=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_periods WHERE card_id=? AND start<=? AND end>? LIMIT 2",(card_id,when,when)).fetchall()
+    if len(links)>1:return (None,None,"")
+    link=links[0] if links else None
     if link is None:
         link=c.execute("SELECT employee_id,vehicle_id,fuel_type FROM fuel_links WHERE card_id=? AND at<=? ORDER BY at DESC LIMIT 1",(card_id,when)).fetchone()
     return tuple(link) if link else (None,None,"")
