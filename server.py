@@ -297,7 +297,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_data(200,{"ok":True})
             except (ValueError,TypeError,KeyError,OverflowError) as e:return self.send_data(400,{"error":str(e)})
             except (sqlite3.Error,OSError):return self.send_data(409,{"error":"Ошибка записи или резервного копирования"})
-        if parts.path in ("/api/writeoff/save","/api/writeoff/import","/api/writeoff/month-action","/api/writeoff/link-card"):
+        if parts.path in ("/api/writeoff/save","/api/writeoff/import","/api/writeoff/month-action","/api/writeoff/link-card","/api/writeoff/batch"):
             try:
                 size=int(self.headers.get("Content-Length","0"))
                 if not 0<size<=(fuel.MAX_FILE if parts.path.endswith("import") else 1024*1024): raise ValueError("Недопустимый размер запроса")
@@ -310,6 +310,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(d,dict):raise ValueError("Некорректный запрос")
                     if parts.path.endswith("/month-action"):writeoff.month_action(c,d.get("month"),d.get("action"),d.get("reason"))
                     elif parts.path.endswith("/link-card"):writeoff.confirm_month_card(c,d)
+                    elif parts.path.endswith("/batch"):return self.send_data(200,writeoff.save_batch(c,d))
                     else:writeoff.save(c,d)
                     return self.send_data(200,{"ok":True})
             except (ValueError,TypeError,KeyError,OverflowError) as e: return self.send_data(400,{"error":str(e)})
