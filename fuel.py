@@ -70,7 +70,7 @@ def stamp(day,clock):
     return datetime.combine(day,clock).isoformat(timespec="seconds")
 
 def parse_rows(rows):
-    card=None; result=[]; order=list(range(8))
+    card=None; result=[]; order=list(range(8));card_col=None
     aliases=(
         {"операция","тип операции","вид операции"},
         {"дата","дата операции"},
@@ -84,13 +84,17 @@ def parse_rows(rows):
         values=list(raw)
         label=str(values[0] or "").strip() if values else ""
         m=re.match(r"^Карта\s*№\s*(\d+)(?:\s|$)",label,re.I)
-        if m: card=m.group(1); continue
+        if m: card=m.group(1);card_col=None;continue
         if re.match(r"^Карта\s*№",label,re.I): raise ValueError(f"Строка {i}: неверный номер карты")
         normalized=[" ".join(str(x or "").strip().casefold().split()) for x in values]
         if any(x in aliases[0] for x in normalized):
             matches=[[j for j,v in enumerate(normalized) if v in names] for names in aliases]
             if any(len(x)!=1 for x in matches):raise ValueError(f"Строка {i}: неполные или неоднозначные заголовки")
-            order=[x[0] for x in matches];continue
+            order=[x[0] for x in matches]
+            card_matches=[j for j,v in enumerate(normalized) if v in {"карта","номер карты","№ карты","топливная карта","номер топливной карты"}]
+            if len(card_matches)>1:raise ValueError(f"Строка {i}: неоднозначный столбец карты")
+            card_col=card_matches[0] if card_matches else None
+            continue
         r=[values[j] if j<len(values) else None for j in order]
         op=str(r[0] or "").strip().casefold()
         if op not in ("отгрузка","возврат"):
@@ -100,6 +104,11 @@ def parse_rows(rows):
                     raise ValueError(f"Строка {i}: неизвестная операция {op[:80]}")
             continue
         try:
+            if card_col is not None:
+                val=values[card_col] if card_col<len(values) else None
+                if not isinstance(val,str) or not re.fullmatch(r"\d+",val.strip()):
+                    raise ValueError("Номер карты в столбце должен быть текстом (с сохранением ведущих нулей)")
+                card=val.strip()
             if not card: raise ValueError("Нет номера карты")
             when=stamp(r[1],r[2]); station=str(r[3] or "").strip(); product=str(r[4] or "").strip()
             price,qty,amount=map(cents,r[5:8])
