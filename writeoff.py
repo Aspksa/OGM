@@ -301,6 +301,8 @@ def report(c,month):
         liters={k:sum(x["quantity"] for x in group if x["category"]==k)/100 for k in ("Бензин","Дизель","Другое")}
         cards.append({"id":ccard["id"],"number":ccard["number"],"employee_id":ccard["employee_id"],"liters":liters,"operations":len(group),"unassigned":sum(x["vehicle_id"] is None for x in group),"active":not ccard["archived"]})
     rows=[]
+    previous_month=(month_bounds(month)[0]-timedelta(days=1)).strftime("%Y-%m")
+    previous_closed=bool(c.execute("SELECT 1 FROM writeoff_closures WHERE month=?",(previous_month,)).fetchone())
     for v in c.execute("SELECT * FROM vehicles ORDER BY plate").fetchall():
         p,rev=stored(c,month,v["id"]);prev=previous(c,month,v["id"])
         if v["archived"] and not rev and not by[v["id"]]: continue
@@ -340,7 +342,7 @@ def report(c,month):
         auto_season=suggestion.get("season","")
         if auto_season not in ("summer","winter"):auto_season=""
         history=[{k:t[k] for k in ("id","card_number","moment","operation","station","product","category","price","quantity","amount","flags")} for t in by[v["id"]]]
-        rows.append({"fuel_history":history,"previous_odo":previous_odo(c,month,v["id"]),"auto_season":auto_season,"current_cards":candidates,"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":result})
+        rows.append({"previous_closed":previous_closed,"fuel_history":history,"previous_odo":previous_odo(c,month,v["id"]),"auto_season":auto_season,"current_cards":candidates,"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":result})
     sources=[{"id":r["id"],"name":r["name"],"rows":json.loads(r["rows_json"]),"at":r["at"]} for r in c.execute("SELECT * FROM writeoff_sources WHERE month=? ORDER BY id DESC",(month,))]
     audit=[dict(r) for r in c.execute("SELECT * FROM writeoff_audit WHERE month=? ORDER BY id DESC",(month,))]
     return {"month":month,"rows":rows,"cards":cards,"fuel_months":ledger["months"],"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit,"closed":False}
