@@ -158,3 +158,42 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(writeoff.report(self.c,"2024-11")["rows"][0]["current_cards"][0]["liters"]["Бензин"],20)
         with self.assertRaises(ValueError):
             writeoff.confirm_month_card(self.c,{"month":month,"vehicle_id":1,"card_id":1,"reason":""})
+
+    def test_month_workspace_independent_statement_and_readiness(self):
+        # Synthetic November statement; December is a separate period.
+        rows=[["Карта № 0000000000000000001"],
+            ["Отгрузка","01.11.2024","12:00:00","АЗС","АИ-95",70,40,2800],
+            ["Возврат","02.11.2024","12:00:00","АЗС","АИ-95",70,-5,-350]]
+        fuel.ingest(self.c,"december-in-filename.xlsx",workbook(rows))
+        w=automation.month_workspace(self.c,"2024-12")
+        self.assertEqual(len(w["months"]),12)
+        self.assertEqual(w["report"]["month"],"2024-12")
+        self.assertTrue(w["months"][10]["statement_loaded"])
+        self.assertEqual(w["months"][10]["operations"],2)
+        self.assertEqual(w["months"][10]["unassigned"],2)
+        self.assertFalse(w["months"][10]["ready"])
+        self.assertFalse(w["months"][11]["statement_loaded"])
+        self.assertEqual(w["months"][11]["operations"],0)
+        self.assertFalse(w["readiness"]["ready"])
+        writeoff.save(self.c,{"month":"2024-11","vehicle_id":1,"revision":0,"monthly_card_id":1,"reason":"Показания","payload":{
+            "input_mode":"monthly","start":20,"end":5,"odo_first":1000,"odo_last":1500,
+            "season":"summer","fuel_reviewed":True,"fuel_review_reason":"Выписка сверена"}})
+        w=automation.month_workspace(self.c,"2024-12")
+        self.assertTrue(w["months"][10]["ready"])
+        self.assertEqual(w["months"][10]["unassigned"],0)
+        writeoff.month_action(self.c,"2024-11","close","Проверено")
+        w=automation.month_workspace(self.c,"2024-11")
+        self.assertTrue(w["months"][10]["closed"])
+        self.assertTrue(w["months"][10]["statement_loaded"])
+        self.assertFalse(w["months"][11]["statement_loaded"])
+        fuel.ingest(self.c,"dec.xlsx",workbook([["Карта № 0000000000000000001"],
+            ["Отгрузка","01.12.2024","12:00:00","АЗС","АИ-95",70,20,1400]]))
+        w=automation.month_workspace(self.c,"2024-12")
+        self.assertTrue(w["months"][11]["statement_loaded"])
+        self.assertFalse(w["months"][11]["ready"])
+        fuel.cancel_import(self.c,{"id":2,"reason":"Ошибочная выписка"})
+        self.assertFalse(automation.month_workspace(self.c,"2024-12")["months"][11]["statement_loaded"])
+        self.assertTrue(automation.month_workspace(self.c,"2024-12")["months"][10]["closed"])
+        nextyear=automation.month_workspace(self.c,"2025-01")
+        self.assertEqual(nextyear["months"][0]["month"],"2025-01")
+        self.assertFalse(any(m["statement_loaded"] for m in nextyear["months"]))
