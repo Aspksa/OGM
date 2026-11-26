@@ -14,3 +14,5 @@ body{grid-template-columns:224px minmax(0,1fr)}aside{position:sticky;top:0;heigh
 .table-pagination{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin:8px 0;color:#a4afbf}.table-pagination button{padding:5px 12px}.table-pagination button:disabled{opacity:.4;cursor:default}.ops-panel details .table-wrap{max-height:300px}
 
 .monthly-summary{display:grid;gap:5px;background:#223143;border:1px solid #425870;border-radius:7px;padding:14px 16px;margin:12px 0}.monthly-summary strong{font-size:20px;color:#dcecff}.monthly-advanced{margin:12px 0;padding:10px 12px;border:1px solid #394452;border-radius:6px}.monthly-advanced summary{cursor:pointer;color:#a9c6e7;font-weight:600}.monthly-advanced[open] summary{margin-bottom:10px}.writeoff-panel td details{min-width:120px;font-size:12px}.writeoff-panel td details p{max-width:300px;margin:5px 0}.writeoff-dialog form>label{margin:10px 0}
+
+.card-pending{display:grid;gap:5px;min-width:200px;padding:7px 0}.card-pending strong{font-variant-numeric:tabular-nums}.card-pending button{white-space:normal;font-size:12px}.monthly-summary select{max-width:320px}
