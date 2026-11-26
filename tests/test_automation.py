@@ -130,3 +130,31 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(r["norm"],10)
         self.assertIsNone(r["actual"])
         self.assertFalse(automation.readiness(self.c,"2024-10")["ready"])
+
+    def test_show_card_totals_before_confirming_historical_link(self):
+        month="2024-10"
+        rows=[["Карта № 0000000000000000001"],
+            ["Отгрузка","01.10.2024","12:00:00","АЗС","АИ-95",70,40,2800],
+            ["Возврат","02.10.2024","12:00:00","АЗС","АИ-95",70,-5,-350],
+            ["Отгрузка","01.11.2024","12:00:00","АЗС","АИ-95",70,20,1400]]
+        fuel.ingest(self.c,"test.xlsx",workbook(rows))
+        writeoff.save(self.c,{"month":month,"vehicle_id":1,"revision":0,"reason":"Ввод","payload":{
+            "input_mode":"monthly","start":97,"end":115,"odo_first":400705,"odo_last":404505,"season":"summer"}})
+        r=writeoff.report(self.c,month)
+        self.assertEqual(r["fuel_months"],["2024-11","2024-10"])
+        x=r["rows"][0]
+        self.assertEqual(x["current_cards"][0]["liters"]["Бензин"],35)
+        self.assertEqual(x["current_cards"][0]["pending"],2)
+        self.assertEqual(x["result"]["km"],3800)
+        self.assertIsNone(x["result"]["actual"])
+        self.assertEqual(x["revision"],1)
+        writeoff.confirm_month_card(self.c,{"month":month,"vehicle_id":1,"card_id":1,"reason":"Подтверждено"})
+        x=writeoff.report(self.c,month)["rows"][0]
+        self.assertEqual(x["result"]["card"],35)
+        self.assertEqual(x["result"]["actual"],17)
+        self.assertEqual(x["current_cards"][0]["pending"],0)
+        self.assertEqual(x["revision"],1)
+        self.assertEqual(writeoff.report(self.c,"2024-11")["unassigned"],1)
+        self.assertEqual(writeoff.report(self.c,"2024-11")["rows"][0]["current_cards"][0]["liters"]["Бензин"],20)
+        with self.assertRaises(ValueError):
+            writeoff.confirm_month_card(self.c,{"month":month,"vehicle_id":1,"card_id":1,"reason":""})

@@ -152,6 +152,22 @@ def assign_month_card(c,month,vid,v,card_id,reason,fuel_type):
     c.execute("INSERT INTO fuel_periods(card_id,start,end,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?,?)",(card_id,a,b,employee,vid,fuel_type))
     c.execute("INSERT INTO fuel_corrections(at,kind,reason,before_json,after_json) VALUES(?,?,?,?,?)",(now(),"monthly_link",reason,"{}",json.dumps({"card_id":card_id,"vehicle_id":vid,"employee_id":employee,"month":month},ensure_ascii=False)))
 
+def confirm_month_card(c,d):
+    month=d.get("month");month_bounds(month)
+    vid=d.get("vehicle_id");card_id=d.get("card_id")
+    if type(vid) is not int or type(card_id) is not int:raise ValueError("Выберите автомобиль и карту")
+    reason=text(d.get("reason"))
+    if not reason:raise ValueError("Укажите основание закрепления")
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        ensure_open(c,month)
+        v=c.execute("SELECT * FROM vehicles WHERE id=? AND archived=0",(vid,)).fetchone()
+        if not v:raise ValueError("Автомобиль не найден")
+        p,_=stored(c,month,vid)
+        assign_month_card(c,month,vid,v,card_id,reason,(p.get("identity") or {}).get("fuel_type",v["fuel_type"]))
+        c.commit()
+    except BaseException:c.rollback();raise
+
 def save(c,d):
     month=d.get("month");month_bounds(month);vid=d.get("vehicle_id")
     if type(vid) is not int or not c.execute("SELECT 1 FROM vehicles WHERE id=?",(vid,)).fetchone(): raise ValueError("Автомобиль не найден")
@@ -237,7 +253,7 @@ def report(c,month):
     if frozen:
         r,at,reason=frozen
         return {**r,"closed":True,"closed_at":at,"close_reason":reason}
-    ops=fuel.report(c,month)["rows"]
+    ledger=fuel.report(c,month);ops=ledger["rows"]
     by=defaultdict(list)
     for r in ops:
         if r["vehicle_id"]: by[r["vehicle_id"]].append(r)
@@ -248,7 +264,7 @@ def report(c,month):
         group=card_rows[ccard["id"]]
         if ccard["archived"] and not group:continue
         liters={k:sum(x["quantity"] for x in group if x["category"]==k)/100 for k in ("Бензин","Дизель","Другое")}
-        cards.append({"id":ccard["id"],"number":ccard["number"],"employee_id":ccard["employee_id"],"liters":liters,"operations":len(group),"unassigned":sum(x["vehicle_id"] is None for x in group)})
+        cards.append({"id":ccard["id"],"number":ccard["number"],"employee_id":ccard["employee_id"],"liters":liters,"operations":len(group),"unassigned":sum(x["vehicle_id"] is None for x in group),"active":not ccard["archived"]})
     rows=[]
     for v in c.execute("SELECT * FROM vehicles ORDER BY plate").fetchall():
         p,rev=stored(c,month,v["id"]);prev=previous(c,month,v["id"])
@@ -271,10 +287,23 @@ def report(c,month):
         card_groups=defaultdict(list)
         for op in by[v["id"]]:card_groups[op["card_number"]].append(op)
         assigned_cards=[{"number":n,"liters":sum(t["quantity"] for t in items if t["category"]==kind)/100,"operations":len(items)} for n,items in sorted(card_groups.items())]
-        rows.append({"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":calculate(p,card/100,kind,prev,flags)})
+        candidates=[]
+        for choice in cards:
+            if not choice["active"] or v["employee_id"] is None or choice["employee_id"]!=v["employee_id"]:continue
+            group=card_rows[choice["id"]]
+            pending=[t for t in group if t["vehicle_id"] is None]
+            other=[t for t in group if (t["vehicle_id"] is not None and t["vehicle_id"]!=v["id"]) or (t["employee_id"] is not None and t["employee_id"]!=v["employee_id"])]
+            candidates.append({"id":choice["id"],"number":choice["number"],"liters":choice["liters"],"operations":choice["operations"],"pending":len(pending),"conflict":bool(other)})
+        if any(x["pending"] for x in candidates):flags.append("Есть заправки по текущей карте без подтверждённой связи за месяц")
+        result=calculate(p,card/100,kind,prev,flags)
+        if p.get("input_mode")=="monthly" and (any(x["pending"] for x in candidates) or (not by[v["id"]] and not p.get("fuel_reviewed"))):
+            result["actual"]=None;result["difference"]=None
+            result["flags"]=[f for f in result["flags"] if not f.startswith("Отрицательный фактический расход") and f!="Нулевой пробег при положительном расходе"]
+            result["flags"].append("Фактический расход ожидает подтверждения заправок")
+        rows.append({"current_cards":candidates,"card_details":assigned_cards,"suggested_card_ids":[x["id"] for x in cards if v["employee_id"] is not None and x["employee_id"]==v["employee_id"]],"id":v["id"],"plate":ident.get("plate",v["plate"]),"model":ident.get("model",v["make"]+" "+v["model"]),"fuel_type":kind,"driver":ident.get("driver"," ".join(filter(None,driver)) if driver else ""), "revision":rev,"payload":p,"previous":prev,"result":result})
     sources=[{"id":r["id"],"name":r["name"],"rows":json.loads(r["rows_json"]),"at":r["at"]} for r in c.execute("SELECT * FROM writeoff_sources WHERE month=? ORDER BY id DESC",(month,))]
     audit=[dict(r) for r in c.execute("SELECT * FROM writeoff_audit WHERE month=? ORDER BY id DESC",(month,))]
-    return {"month":month,"rows":rows,"cards":cards,"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit,"closed":False}
+    return {"month":month,"rows":rows,"cards":cards,"fuel_months":ledger["months"],"unassigned":sum(1 for r in ops if not r["vehicle_id"]),"sources":sources,"audit":audit,"closed":False}
 
 def import_old(c,month,name,blob):
     month_bounds(month)
