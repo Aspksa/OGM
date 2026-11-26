@@ -460,3 +460,52 @@ button.wo-vehicle-button[aria-pressed=true]{background:#2a3c50;border-color:#617
 .wo-review-dialog table th{background:#2b3b4d;color:#d7e5f5}
 .wo-premium .wo-calc-details pre{overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;font-size:11px}
 .wo-premium .wo-balance-flow>div:last-child strong{color:var(--wo-gold)}
+
+/* Design Evolution 3.0: settings-controlled workspace, low visual noise. */
+.wo-evolution{--wo-font-scale:1;--wo-motion-time:220ms;--wo-sidebar-width:235px;font-family:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;font-size:calc(13px * var(--wo-font-scale));isolation:isolate}
+.wo-evolution[data-font="90"]{--wo-font-scale:.9}.wo-evolution[data-font="110"]{--wo-font-scale:1.1}.wo-evolution[data-font="120"]{--wo-font-scale:1.2}
+.wo-evolution[data-motion=soft]{--wo-motion-time:120ms}.wo-evolution[data-motion=off]{--wo-motion-time:0ms}
+.wo-evolution[data-surface=flat] .wo-calendar,.wo-evolution[data-surface=flat] .wo-inline-metrics,.wo-evolution[data-surface=flat] .wo-vehicle-list,.wo-evolution[data-surface=flat] .wo-calculation{background:transparent;border-color:transparent;box-shadow:none;border-radius:0}
+.wo-evolution[data-surface=flat] .wo-calendar,.wo-evolution[data-surface=flat] .wo-inline-metrics{border-bottom:1px solid #354352}
+.wo-evolution[data-surface=flat] .wo-vehicle-list{border-right:1px solid #354352;padding-left:0}
+.wo-evolution[data-surface=flat] .wo-reading-group{background:#1e2935;border-color:#344658}
+.wo-evolution .wo-workbench{grid-template-columns:minmax(180px,var(--wo-sidebar-width)) minmax(0,1fr);transition:grid-template-columns var(--wo-motion-time) ease;align-items:start}
+.wo-evolution[data-sidebar=collapsed] .wo-workbench{grid-template-columns:104px minmax(0,1fr)}
+.wo-evolution[data-sidebar=collapsed] .wo-vehicle-button{display:block;padding:7px 4px;text-align:center;min-width:0}.wo-evolution[data-sidebar=collapsed] .wo-vehicle-button>div:not(:first-child),.wo-evolution[data-sidebar=collapsed] .wo-vehicle-button>div:first-child>:not(strong),.wo-evolution[data-sidebar=collapsed] .wo-sidebar-slider,.wo-evolution[data-sidebar=collapsed] .wo-list-head h3{display:none}
+.wo-evolution[data-sidebar=collapsed] .wo-list-head{flex-wrap:wrap}.wo-evolution[data-sidebar=collapsed] .wo-vehicle-button strong{font-size:11px;overflow-wrap:anywhere}
+.wo-evolution .wo-sidebar-slider{width:100%;margin:9px 0 2px;accent-color:#9bbddd;cursor:ew-resize}
+.wo-evolution .wo-vehicle-button{transition:background var(--wo-motion-time),border-color var(--wo-motion-time),transform var(--wo-motion-time)}
+.wo-evolution .wo-vehicle-button[draggable=true]{cursor:grab}.wo-evolution .wo-vehicle-button[draggable=true]:active{cursor:grabbing}
+.wo-evolution .wo-panel-enter{animation:wo-reveal var(--wo-motion-time) ease-out both}
+.wo-evolution .wo-calendar-head h2{font-size:calc(25px * var(--wo-font-scale))}
+.wo-evolution .wo-calc-heading h2{font-size:calc(clamp(20px,2.5vw,29px) * var(--wo-font-scale))}
+.wo-evolution .wo-inline-metrics strong{font-size:calc(clamp(22px,3vw,34px) * var(--wo-font-scale))}
+.wo-evolution .wo-reading-group h3,.wo-evolution .wo-result-heading{font-size:calc(14px * var(--wo-font-scale))}
+.wo-evolution .wo-cell-input{font-size:calc(18px * var(--wo-font-scale))}
+.wo-evolution .wo-inline-ledger .wo-cell-input,.wo-evolution .wo-season-row .wo-cell-input{font-size:calc(13px * var(--wo-font-scale))}
+.wo-evolution .wo-vehicle-button strong{font-size:calc(15px * var(--wo-font-scale))}
+.wo-evolution .wo-calculation label,.wo-evolution .wo-history-item>summary,.wo-evolution .wo-toolbar button,.wo-evolution .wo-toolbar select,.wo-evolution .wo-search-bar button,.wo-evolution .wo-search-bar select{font-size:calc(12px * var(--wo-font-scale))}
+.wo-evolution .wo-calc-nav{flex-wrap:wrap;justify-content:flex-end}.wo-evolution .wo-calc-nav button{font-size:11px}
+.wo-evolution .wo-cell-input[data-origin=manual]{border-left:3px solid #d4b47e}.wo-evolution .wo-cell-input[data-origin=auto]{border-left:3px solid #8abcae}.wo-evolution .wo-cell-input[data-origin=carried]{border-left:3px solid #8aaed0}
+.wo-evolution .wo-result-column[data-related] .wo-balance{border-top-color:#9dbbd5}.wo-evolution .wo-result-column[data-related] .wo-orbit{background:#263d50}
+.wo-evolution .wo-effect-preview{font-size:11px;margin:8px 0 0}.wo-effect-preview:empty{display:none}
+.wo-orbit{margin:0 0 12px;background:#192834;border-radius:7px;padding:8px;transition:background var(--wo-motion-time)}
+.wo-orbit svg{display:block;width:100%;max-height:240px;overflow:visible}
+.wo-orbit-track{color:#405465}.wo-orbit-inner{stroke:#4c647b}.wo-orbit-value{stroke:#9bc2e8;transition:stroke-dasharray var(--wo-motion-time),stroke var(--wo-motion-time)}
+.wo-orbit-over .wo-orbit-value{stroke:#e6a0a4}.wo-orbit-link{stroke:#506c84;stroke-width:1.2}.wo-orbit-known .wo-orbit-link{stroke-dasharray:4 4;animation:wo-flow 2s linear infinite}
+.wo-orbit-caption{font-size:10px;fill:#aebfd1}.wo-orbit-number{font-size:23px;font-weight:600;fill:#e3edf7;font-variant-numeric:tabular-nums}.wo-orbit-label{font-size:14px;font-weight:600;fill:#dce9f5;font-variant-numeric:tabular-nums}.wo-orbit-note{font-size:10px;line-height:1.4;color:#a6b9cc;padding:3px 6px}
+@keyframes wo-flow{to{stroke-dashoffset:-16}}
+.wo-fuel-calendar{padding:10px 0}.wo-fuel-calendar h3,.wo-price-chart h3{font-size:13px;margin:8px 0}
+.wo-daily-chart{height:76px;display:flex;align-items:stretch;gap:2px;padding:5px 0;border-bottom:1px solid #405367}
+.wo-evolution button.wo-daily-bar{flex:1;min-width:0;border:0;background:transparent;padding:0;display:flex;align-items:flex-end;justify-content:center;gap:1px;border-radius:2px}.wo-daily-bar span{width:42%;min-width:1px;border-radius:2px 2px 0 0}.wo-day-in{background:#80b4d9}.wo-day-out{background:#c8a57a}
+.wo-evolution .wo-days{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px;margin:10px 0}.wo-evolution button.wo-day{display:grid;gap:2px;justify-items:start;padding:5px 6px;min-width:0;min-height:38px;background:#1e2a36;border-color:#334556;font-size:11px}.wo-day small{font-size:9px;color:#a8b9cb;overflow-wrap:anywhere}.wo-evolution button.wo-day-active{background:#263c4d;border-color:#4c6b81}.wo-evolution button.wo-day[aria-pressed=true],.wo-evolution button.wo-daily-bar[aria-pressed=true]{outline:2px solid #c4d7ec;outline-offset:1px}
+.wo-price-chart svg{width:100%;max-height:110px;background:#1b2936;border-radius:5px}.wo-price-line{stroke:#a6c3df;stroke-width:1.5}.wo-price-point{fill:#d4b47e}
+.wo-annual-chart{height:114px;display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:4px;margin:12px 0}.wo-annual-item{display:grid;grid-template-rows:1fr auto;gap:4px;text-align:center;min-width:0}.wo-annual-item small{font-size:9px;color:#a8bace}.wo-annual-bars{display:flex;align-items:flex-end;justify-content:center;gap:2px;border-bottom:1px solid #45586d}.wo-annual-bars span{width:35%;border-radius:2px 2px 0 0}.wo-annual-actual{background:#89b8de}.wo-annual-norm{background:#657c93}.wo-annual-bars .wo-annual-unknown{height:2px;background:#394655}
+.wo-column-settings{margin:8px 0;font-size:12px}.wo-column-settings label{display:inline-flex;align-items:center;gap:4px;margin:6px 12px 0 0}.wo-column-settings input{accent-color:#8bb8ed}.wo-evolution .wo-inline-ledger [hidden]{display:none!important}
+.wo-evolution .wo-actionbar{z-index:10}.wo-evolution:fullscreen{overflow:auto;background:#151d27;padding:18px max(18px,calc((100vw - 1800px)/2));box-sizing:border-box;width:100%;height:100%}.wo-evolution:fullscreen .wo-actionbar{position:sticky;bottom:0}
+.wo-statement-content>label{display:grid;gap:6px}.wo-statement-content>label.wo-ack{display:flex;align-items:center;gap:8px}
+.wo-evolution[data-motion=off] *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+.wo-evolution[data-motion=soft] .wo-orbit-link{animation:none}
+@media(max-width:900px){.wo-evolution .wo-workbench,.wo-evolution[data-sidebar=collapsed] .wo-workbench{grid-template-columns:minmax(0,1fr)}.wo-evolution[data-surface=flat] .wo-vehicle-list{border-right:0;border-bottom:1px solid #354352}.wo-evolution[data-sidebar=collapsed] .wo-vehicle-scroll{display:none}.wo-evolution .wo-sidebar-slider{display:none}.wo-evolution .wo-actionbar{position:static}.wo-evolution .wo-vehicle-button{min-width:155px}}
+@media(max-width:540px){.wo-evolution .wo-days{gap:3px}.wo-evolution button.wo-day{padding:4px}.wo-orbit{padding:3px}.wo-evolution .wo-calc-nav{justify-content:flex-start}}
+@media(prefers-reduced-motion:reduce){.wo-evolution *{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
