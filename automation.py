@@ -25,7 +25,7 @@ def file_kind(name,blob):
 
 def preview(c,name,blob):
     ext=file_kind(name,blob)
-    rows=fuel.parse_file(name,blob)
+    controls=[];rows=fuel.parse_file(name,blob,controls)
     if not rows:
         if ext==".xlsx":
             from openpyxl import load_workbook
@@ -42,7 +42,7 @@ def preview(c,name,blob):
     months=defaultdict(lambda:{"operations":0,"liters":0,"amount":0})
     products=defaultdict(lambda:{"operations":0,"liters":0,"amount":0})
     groups=defaultdict(lambda:{"operations":0,"matched":0,"unassigned":0,"mismatch":0,"links":set()})
-    counts=Counter();duplicates=0;unassigned=0;unknown=0;mismatch=0
+    counts=Counter();duplicates=0;unassigned=0;unknown=0;mismatch=0;amount_errors=0;similar=defaultdict(set);ambiguous=0
     for row in rows:
         card,when,op,station,product,category,price,qty,amount=row
         for g in (months[when[:7]],products[(product,category)]):
@@ -54,11 +54,15 @@ def preview(c,name,blob):
         else:g["unassigned"]+=1;unassigned+=1
         if category=="Другое":unknown+=1
         if v and f and category!="Другое" and category!=f:g["mismatch"]+=1;mismatch+=1
+        if abs(price*qty-amount*100)>100:amount_errors+=1
         sig=fuel.signature(row);counts[sig]+=1
+        similar[(card,when,op)].add(sig)
+        card_id=cards.get(card)
+        if card_id and c.execute("SELECT COUNT(*) FROM fuel_periods WHERE card_id=? AND start<=? AND end>?",(card_id,when,when)).fetchone()[0]>1:ambiguous+=1
         if c.execute("SELECT 1 FROM fuel_operations WHERE signature=? AND occurrence=?",(sig,counts[sig])).fetchone():duplicates+=1
     def metric(g):return {**g,"liters":g["liters"]/100,"amount":g["amount"]/100}
     return {"kind":"fuel","format":ext,"digest":sha256(blob).hexdigest(),"operations":len(rows),
-        "duplicates":duplicates,"new_cards":sum(k not in cards for k in groups),"unassigned":unassigned,"unknown":unknown,"mismatch":mismatch,
+        "controls":controls,"control_complete":bool(controls) and all(x["checked"] for x in controls if x["operations"]) and any(x["checked"] for x in controls),"amount_errors":amount_errors,"conflicting_events":sum(len(v)>1 for v in similar.values()),"ambiguous_links":ambiguous,"duplicates":duplicates,"new_cards":sum(k not in cards for k in groups),"unassigned":unassigned,"unknown":unknown,"mismatch":mismatch,
         "months":[{"month":k,**metric(v)} for k,v in sorted(months.items())],
         "products":[{"product":k[0],"category":k[1],**metric(v)} for k,v in sorted(products.items())],
         "cards":[{"number":k,"new":k not in cards,**{**v,"links":[{"employee":e,"plate":p} for e,p in sorted(v["links"])]}} for k,v in sorted(groups.items())]}
@@ -205,3 +209,55 @@ def export_review(c,month):
     ws.freeze_panes="C5"
     wb["Списание ГСМ"]["A6"]="За "+month+" — "+("закрытый период" if r.get("closed") else "проект к проверке" if r["ready"] else "НЕ ГОТОВО, черновик")
     wb.active=0;out=BytesIO();wb.save(out);wb.close();return out.getvalue()
+
+def vehicle_analysis(c,month):
+    """Read-only comparisons; only closed historical months supply reliable baselines."""
+    start,end=writeoff.month_bounds(month)
+    if start.year<2:raise ValueError("Недопустимый период")
+    report=writeoff.report(c,month)
+    previous=next(history_months(month,1))
+    periods=list(dict.fromkeys([previous,*[f"{start.year:04d}-{i:02d}" for i in range(1,start.month)]]))
+    historical={}
+    for m in periods:
+        snap=writeoff.closure(c,m)
+        if snap:historical[m]={r["id"]:r for r in snap[0]["rows"]}
+    def valid(x):
+        z=x["result"]
+        return z["actual"] is not None and z["actual"]>=0 and z["km"] is not None and z["km"]>0
+    def rate(x):
+        return writeoff.rounded(x["result"]["actual"]/x["result"]["km"]*100) if valid(x) else None
+    out=[]
+    for x in report["rows"]:
+        z=x["result"];p=x["payload"];vid=x["id"];kind=x["fuel_type"]
+        hist=[(m,rs[vid]) for m,rs in historical.items() if vid in rs and rs[vid]["fuel_type"]==kind and valid(rs[vid])]
+        last=next((r for m,r in hist if m==previous),None)
+        annual=[r for m,r in hist if m[:4]==month[:4]]
+        if report.get("closed") and valid(x):annual.append(x)
+        km=sum(r["result"]["km"] for r in annual);used=sum(r["result"]["actual"] for r in annual)
+        old_rate=rate(last) if last else None;cur_rate=rate(x)
+        history=x.get("fuel_history")
+        matched=[r for r in history if r["category"]==kind] if history is not None else None
+        # A zero purchase total is known only with reviewed absence of fuel.
+        reviewed=p.get("fuel_reviewed") and "Операции изменились после сверки" not in z["flags"]
+        amount=sum(r["amount"] for r in matched)/100 if matched is not None and (matched or reviewed) else None
+        km_cost=writeoff.rounded(amount/z["km"]) if amount is not None and z["km"] is not None and z["km"]>0 else None
+        issues=[{"code":"balance","message":msg,"basis":"Расчёт месячного баланса"} for msg in z["flags"]]
+        def warn(code,message,basis):issues.append({"code":code,"message":message,"basis":basis})
+        if x.get("previous_odo") is not None and p.get("odo_first") is not None and abs(x["previous_odo"]-p["odo_first"])>.005:
+            warn("odometer_gap","Начальный одометр отличается от предыдущего месяца","Предыдущий конечный одометр: "+str(x["previous_odo"]))
+        if len(hist)>=2:
+            avg_km=sum(r["result"]["km"] for _,r in hist)/len(hist)
+            avg_rate=sum(r["result"]["actual"] for _,r in hist)/sum(r["result"]["km"] for _,r in hist)*100
+            if z["km"] is not None and z["km"]>avg_km*1.5:warn("mileage","Пробег более чем на 50% выше исторического среднего",f"Среднее {avg_km:.2f} км; {len(hist)} закрытых месяцев")
+            if cur_rate is not None and cur_rate>avg_rate*1.3:warn("consumption","Расход на 100 км более чем на 30% выше исторического",f"Среднее {avg_rate:.2f} л/100 км; {len(hist)} закрытых месяцев")
+        if z["km"] is not None and z["km"]>0 and z["norm"] is not None and z["start"] is not None and z["end"] is not None and z["norm"]>z["start"]+z["card"]+z["manual_in"]-z["manual_out"]-z["end"]+max(20,z["norm"]*.2):
+            warn("possible_missing","Проверьте возможный пропуск заправки или отклонение от нормы","Расход по норме заметно выше доступного баланса; это не доказательство пропуска")
+        if not report.get("closed"):
+            sheets=operations.waybills(c,month,vid)
+            if sheets:
+                for k,expected in (("odo_first",sheets[0]["odo_first"]),("odo_last",sheets[-1]["odo_last"])):
+                    if p.get(k) is not None and expected is not None and abs(p[k]-expected)>.005:warn("document_difference","Показания месячной карточки и путевых листов различаются",f"{k}: карточка {p[k]}, путевой лист {expected}")
+        for t in history or []:
+            if t["flags"]:warn("operation",f"{t['moment']} · карта {t['card_number']}: "+ "; ".join(t["flags"]),"Операция из выписки")
+        out.append({"id":vid,"plate":x["plate"],"model":x["model"],"fuel_type":kind,"purchase_amount":amount,"purchase_per_km":km_cost,"rate":cur_rate,"previous_month":previous,"previous_rate":old_rate,"rate_change":writeoff.rounded(cur_rate-old_rate) if cur_rate is not None and old_rate is not None else None,"annual_rate":writeoff.rounded(used/km*100) if km else None,"annual_months":len(annual),"issues":issues})
+    return {"month":month,"rows":out,"unassigned":report["unassigned"],"method":"Стоимость — нетто покупок по картам нужного вида топлива, не бухгалтерская стоимость списания. Годовой расход — взвешенный по пробегу, только закрытые месяцы до выбранного периода включительно. Сигналы отклонений не изменяют данные."}
