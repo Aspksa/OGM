@@ -134,7 +134,7 @@ def clean(c,month,vid,d):
           "organization":text(op.get("organization")),"document":doc,"confirmed":confirmed,"note":text(op.get("note"))})
     return out
 
-def assign_month_card(c,month,vid,v,card_id,reason):
+def assign_month_card(c,month,vid,v,card_id,reason,fuel_type):
     """Explicit whole-month link; never steal historical operations or overlap periods."""
     if type(card_id) is not int:raise ValueError("Выберите карту из справочника")
     card=c.execute("SELECT * FROM cards WHERE id=?",(card_id,)).fetchone()
@@ -149,7 +149,7 @@ def assign_month_card(c,month,vid,v,card_id,reason):
     for row in fuel.report(c,month)["rows"]:
         if row["card_id"]==card_id and ((row["vehicle_id"] is not None and row["vehicle_id"]!=vid) or (row["employee_id"] is not None and row["employee_id"]!=employee)):
             raise ValueError("В выбранном месяце карта уже связана с другим автомобилем или сотрудником")
-    c.execute("INSERT INTO fuel_periods(card_id,start,end,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?,?)",(card_id,a,b,employee,vid,v["fuel_type"]))
+    c.execute("INSERT INTO fuel_periods(card_id,start,end,employee_id,vehicle_id,fuel_type) VALUES(?,?,?,?,?,?)",(card_id,a,b,employee,vid,fuel_type))
     c.execute("INSERT INTO fuel_corrections(at,kind,reason,before_json,after_json) VALUES(?,?,?,?,?)",(now(),"monthly_link",reason,"{}",json.dumps({"card_id":card_id,"vehicle_id":vid,"employee_id":employee,"month":month},ensure_ascii=False)))
 
 def save(c,d):
@@ -165,7 +165,10 @@ def save(c,d):
         if type(d.get("revision")) is not int or d["revision"]!=rev: raise ValueError("Карточка изменена, обновите страницу")
         v=c.execute("SELECT * FROM vehicles WHERE id=?",(vid,)).fetchone()
         if d.get("monthly_card_id") is not None:
-            assign_month_card(c,month,vid,v,d["monthly_card_id"],reason)
+            assign_month_card(c,month,vid,v,d["monthly_card_id"],reason,(old.get("identity") or {}).get("fuel_type",v["fuel_type"]))
+        if p["input_mode"]=="monthly":
+            for key,col in (("summer_norm","summer"),("winter_norm","winter")):
+                if p[key] is None:p[key]=old.get(key) if old.get(key) is not None else v[col]
         if p["input_mode"]=="monthly" and not p["season"]:
             import operations
             suggestion=operations.suggestion(c,month,vid,p)
