@@ -446,7 +446,7 @@ button.wo-vehicle-button[aria-pressed=true]{background:#2a3c50;border-color:#617
 .writeoff-panel .wo-calendar-period{font-weight:500;color:#b8cbde}
 .writeoff-panel .wo-toolbar{gap:var(--wo-space);margin-bottom:var(--wo-space)}
 .writeoff-panel .wo-toolbar button,.writeoff-panel .wo-toolbar select,.writeoff-panel .wo-toolbar input,.writeoff-panel .wo-search-bar button,.writeoff-panel .wo-search-bar input,.writeoff-panel .wo-search-bar select,.writeoff-panel .wo-action-controls button{min-height:34px;border-radius:6px;transition:background .16s,border-color .16s,box-shadow .16s}
-.writeoff-panel .wo-toolbar .primary,.writeoff-panel .wo-actionbar .primary:not(:disabled){background:linear-gradient(180deg,#6388af,#476d95);color:#fff;border-color:#8aacd0;box-shadow:inset 0 1px #d1e5fc25}
+.writeoff-panel .wo-toolbar .primary,.writeoff-panel .wo-actionbar .primary:not(:disabled){background:linear-gradient(180deg,#507399,#476d95);color:#fff;border-color:#8aacd0;box-shadow:inset 0 1px #d1e5fc25}
 .writeoff-panel button:not(:disabled):active{transform:translateY(1px)}
 .wo-glyph{display:inline-block;width:16px;height:16px;flex:0 0 16px;color:inherit;vertical-align:middle}
 .wo-icon-label{display:inline-flex!important;align-items:center;gap:7px}
