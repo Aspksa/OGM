@@ -69,8 +69,8 @@ def stamp(day,clock):
     if not isinstance(clock,time): clock=time.fromisoformat(str(clock).strip())
     return datetime.combine(day,clock).isoformat(timespec="seconds")
 
-def parse_rows(rows):
-    card=None; result=[]; order=list(range(8));card_col=None
+def parse_rows(rows,controls=None):
+    card=None; result=[]; order=list(range(8));card_col=None;declared=None
     aliases=(
         {"операция","тип операции","вид операции"},
         {"дата","дата операции"},
@@ -97,6 +97,13 @@ def parse_rows(rows):
             continue
         r=[values[j] if j<len(values) else None for j in order]
         op=str(r[0] or "").strip().casefold()
+        # Only explicit net grand totals are machine-comparable; generic subtotals
+        # can be per card/product and must never be guessed.
+        if op in ("итого по выписке нетто","итого нетто по выписке"):
+            if declared is not None:raise ValueError(f"Строка {i}: повтор контрольного итога")
+            try:declared=(cents(r[6]),cents(r[7]))
+            except Exception as e:raise ValueError(f"Строка {i}: неверный контрольный итог") from e
+            continue
         if op not in ("отгрузка","возврат"):
             if op and any(r[j] not in (None,"") for j in (1,2)) and any(r[j] not in (None,"") for j in (5,6,7)):
                 # Reject transaction-like rows, but leave explicit statement subtotals separate.
@@ -115,6 +122,10 @@ def parse_rows(rows):
             if not station or not product or price<0 or (op=="возврат" and (qty>0 or amount>0)) or (op=="отгрузка" and (qty<0 or amount<0)): raise ValueError("Некорректная операция")
             result.append((card,when,op,station,product,category(product),price,qty,amount))
         except Exception as e: raise ValueError(f"Строка {i}: {e}") from e
+    if declared is not None:
+        computed=(sum(r[7] for r in result),sum(r[8] for r in result))
+        if declared!=computed:raise ValueError("Контрольный итог нетто не совпадает с операциями листа")
+    if controls is not None:controls.append({"checked":declared is not None,"operations":len(result),"liters":sum(r[7] for r in result)/100,"amount":sum(r[8] for r in result)/100})
     return result
 
 def open_legacy_xls(xlrd,blob):
@@ -129,7 +140,7 @@ def open_legacy_xls(xlrd,blob):
         return xlrd.open_workbook(file_contents=blob,on_demand=True,encoding_override="cp1251",logfile=StringIO())
     return book
 
-def parse_file(name,blob):
+def parse_file(name,blob,controls=None):
     result=[]
     if name.lower().endswith(".xls"):
         import xlrd
@@ -146,7 +157,7 @@ def parse_file(name,blob):
                                 d=xlrd.xldate.xldate_as_datetime(v,book.datemode); v=d.time() if 0<=v<1 else d
                             values.append(v)
                         yield values
-                result.extend(parse_rows(rows()))
+                result.extend(parse_rows(rows(),controls))
         finally: book.release_resources()
     elif name.lower().endswith(".xlsx"):
         from openpyxl import load_workbook
@@ -156,7 +167,7 @@ def parse_file(name,blob):
         try:
             for sheet in book.worksheets:
                 if (sheet.max_row or 0)>100000 or (sheet.max_column or 0)>256: raise ValueError("Слишком большая таблица")
-                result.extend(parse_rows(sheet.iter_rows(max_col=max(8,sheet.max_column or 8),values_only=True)))
+                result.extend(parse_rows(sheet.iter_rows(max_col=max(8,sheet.max_column or 8),values_only=True),controls))
         finally: book.close()
     else: raise ValueError("Поддерживаются только XLS и XLSX")
     return result
