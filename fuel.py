@@ -108,11 +108,23 @@ def parse_rows(rows):
         except Exception as e: raise ValueError(f"Строка {i}: {e}") from e
     return result
 
+def open_legacy_xls(xlrd,blob):
+    # Old Russian supplier exports (BIFF before 8) omit CODEPAGE.
+    # Preserve explicit workbook encodings and Unicode BIFF8; use CP1251
+    # only when xlrd would otherwise silently fall back to Latin-1.
+    from io import StringIO
+    diagnostics=StringIO()
+    book=xlrd.open_workbook(file_contents=blob,on_demand=True,logfile=diagnostics)
+    if book.biff_version<80 and (book.codepage is None or "No CODEPAGE record" in diagnostics.getvalue()):
+        book.release_resources()
+        return xlrd.open_workbook(file_contents=blob,on_demand=True,encoding_override="cp1251",logfile=StringIO())
+    return book
+
 def parse_file(name,blob):
     result=[]
     if name.lower().endswith(".xls"):
         import xlrd
-        book=xlrd.open_workbook(file_contents=blob,on_demand=True)
+        book=open_legacy_xls(xlrd,blob)
         try:
             for sheet in book.sheets():
                 if sheet.nrows>100000 or sheet.ncols>256: raise ValueError("Слишком большая таблица")

@@ -87,3 +87,55 @@ class FuelTests(unittest.TestCase):
                 fuel.add_period(c,{"id":1,"action":"delete","reason":"Сверка"})
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM fuel_periods").fetchone()[0],0)
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM fuel_corrections").fetchone()[0],2)
+
+class LegacyEncodingTests(unittest.TestCase):
+    def test_missing_codepage_reopens_with_windows_1251(self):
+        from unittest.mock import Mock
+        library=Mock()
+        first=Mock(biff_version=50,codepage=None)
+        repaired=Mock(biff_version=50,codepage=None)
+        library.open_workbook.side_effect=[first,repaired]
+        self.assertIs(fuel.open_legacy_xls(library,b"legacy"),repaired)
+        first.release_resources.assert_called_once()
+        self.assertEqual(library.open_workbook.call_args.kwargs["encoding_override"],"cp1251")
+
+    def test_explicit_codepage_and_unicode_are_preserved(self):
+        from unittest.mock import Mock
+        for version,codepage in ((50,1251),(50,1252),(80,1200),(80,None)):
+            with self.subTest(version=version,codepage=codepage):
+                library=Mock()
+                book=Mock(biff_version=version,codepage=codepage)
+                library.open_workbook.return_value=book
+                self.assertIs(fuel.open_legacy_xls(library,b"book"),book)
+                library.open_workbook.assert_called_once()
+                self.assertNotIn("encoding_override",library.open_workbook.call_args.kwargs)
+                book.release_resources.assert_not_called()
+
+    def test_real_legacy_biff5_without_codepage(self):
+        import struct
+        from xlwt.CompoundDoc import XlsDoc
+        def record(kind,data=b""):
+            return struct.pack("<HH",kind,len(data))+data
+        def bof(kind):
+            return record(0x0809,struct.pack("<HHHH",0x0500,kind,0x540A,0x07CD))
+        def label(row,col,value):
+            raw=str(value).encode("cp1251")
+            return record(0x0204,struct.pack("<HHHH",row,col,0,len(raw))+raw)
+        sheetname=b"Data"
+        def bounds(offset):
+            return record(0x0085,struct.pack("<IBBB",offset,0,0,len(sheetname))+sheetname)
+        globals_start=bof(0x0005)+record(0x0022,b"\x00\x00")
+        offset=len(globals_start)+len(bounds(0))+len(record(0x000A))
+        globals_stream=globals_start+bounds(offset)+record(0x000A)
+        sheet=bof(0x0010)
+        for i,row in enumerate(ROWS):
+            for j,value in enumerate(row):sheet+=label(i,j,value)
+        sheet+=record(0x000A)
+        out=BytesIO()
+        XlsDoc().save(out,globals_stream+sheet)
+        rows=fuel.parse_file("legacy.xls",out.getvalue())
+        self.assertEqual(len(rows),2)
+        self.assertEqual(rows[0][0],"0000000000000000001")
+        self.assertEqual(rows[0][2],"отгрузка")
+        self.assertEqual(rows[0][4],"Бензин АИ-95")
+        self.assertEqual(sum(row[7] for row in rows),3800)
