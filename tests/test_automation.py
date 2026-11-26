@@ -220,3 +220,26 @@ class AutomationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             writeoff.save_batch(self.c,{"month":"2024-11","entries":[{"vehicle_id":1,"revision":1,"values":{"card":999}}]})
         self.assertEqual(writeoff.stored(self.c,"2024-11",1)[0]["end"],5)
+
+    def test_vehicle_fuel_history_separate_months_and_frozen_snapshot(self):
+        rows=[["Карта № 0000000000000000001"],
+            ["Отгрузка","01.11.2024","12:00:00","АЗС","АИ-95",70,40,2800],
+            ["Возврат","02.11.2024","12:00:00","АЗС","АИ-95",70,-5,-350],
+            ["Отгрузка","01.12.2024","12:00:00","АЗС","АИ-95",70,20,1400]]
+        fuel.ingest(self.c,"history.xlsx",workbook(rows))
+        self.assertEqual(writeoff.report(self.c,"2024-11")["rows"][0]["fuel_history"],[])
+        writeoff.save(self.c,{"month":"2024-11","vehicle_id":1,"revision":0,"monthly_card_id":1,"reason":"Сверка","payload":{
+            "input_mode":"monthly","start":20,"end":5,"odo_first":1000,"odo_last":1500,
+            "season":"summer","capacity":60,"fuel_reviewed":True,"fuel_review_reason":"Выписка сверена"}})
+        r=writeoff.report(self.c,"2024-11")["rows"][0]
+        self.assertEqual(len(r["fuel_history"]),2)
+        self.assertEqual([x["quantity"] for x in r["fuel_history"]],[4000,-500])
+        self.assertEqual(sum(x["amount"] for x in r["fuel_history"]),245000)
+        self.assertEqual(r["result"]["card"],35)
+        self.assertEqual(r["payload"]["capacity"],60)
+        self.assertEqual(writeoff.report(self.c,"2024-12")["rows"][0]["fuel_history"],[])
+        writeoff.month_action(self.c,"2024-11","close","Проверено")
+        closed=writeoff.report(self.c,"2024-11")
+        self.assertTrue(closed["closed"])
+        self.assertEqual(closed["rows"][0]["fuel_history"],r["fuel_history"])
+        self.assertEqual(closed["rows"][0]["payload"]["capacity"],60)
