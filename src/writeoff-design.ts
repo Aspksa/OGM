@@ -1,7 +1,6 @@
+import {el as html,fmt} from "./ui-kit.js";
 // Presentation only: SVG and native controls; no source or accounting data is changed.
 const ns="http://www.w3.org/2000/svg";
-const fmt=(x:number|null)=>x===null?"—":new Intl.NumberFormat("ru-RU",{maximumFractionDigits:2}).format(x);
-function html<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string,cls?:string){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
 function svg<K extends keyof SVGElementTagNameMap>(tag:K,attrs:Record<string,string|number>){const e=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,String(v));return e;}
 export function balanceGraphic(){
  const root=html("figure",undefined,"wo-orbit"),chart=svg("svg",{viewBox:"0 0 340 180",role:"img","aria-label":"Топливный баланс"});root.append(chart);
